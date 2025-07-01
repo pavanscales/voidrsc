@@ -1,8 +1,9 @@
 import { readdirSync, statSync } from "fs";
-import path from "path";
+import path, { sep } from "path";
+import { pathToFileURL } from "url";
 import { router } from "./router";
+import React from "react";
 
-// Recursively get all .tsx files from /pages
 const pagesDir = path.join(process.cwd(), "pages");
 
 function walk(dir: string): string[] {
@@ -17,15 +18,18 @@ function walk(dir: string): string[] {
 
 function toRoutePath(filePath: string): string {
   const relPath = filePath.replace(pagesDir, "").replace(/\.tsx$/, "");
-  const segments = relPath.split(path.sep).filter(Boolean);
+  const segments = relPath.split(sep).filter(Boolean);
+
+  // Fix homepage route
+  if (segments.length === 1 && segments[0] === "index") {
+    return "/";
+  }
 
   return (
     "/" +
     segments
       .map((seg) =>
-        seg.startsWith("[") && seg.endsWith("]")
-          ? `:${seg.slice(1, -1)}`
-          : seg
+        seg.startsWith("[") && seg.endsWith("]") ? `:${seg.slice(1, -1)}` : seg
       )
       .join("/")
   );
@@ -35,13 +39,15 @@ for (const filePath of walk(pagesDir)) {
   const routePath = toRoutePath(filePath);
   const fileName = path.basename(filePath);
   const isLayout = fileName === "_layout.tsx";
-  const isGroup = filePath.includes(`${path.sep}(`); // folders like /(auth)
+  const isGroup = filePath.includes(`${sep}(`);
+
+  console.log(`✅ Registered route: ${routePath} → ${filePath}`);
 
   router.addRoute(
     routePath,
     async () => {
-      const { default: Component } = await import(filePath);
-      return <Component />;
+      const { default: Component } = await import(pathToFileURL(filePath).href);
+      return React.createElement(Component);
     },
     { isLayout, isGroup }
   );
