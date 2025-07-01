@@ -1,3 +1,5 @@
+// router.ts
+
 type RouteHandler = (
   req: Request,
   params: Record<string, string>,
@@ -193,20 +195,17 @@ export class UltraRouter {
     return response;
   }
 
-  // ✅ New method to support preload and dev tools
+  // ✅ Add this for preloadAll
   getAllRoutes(): { path: string }[] {
     const routes: { path: string }[] = [];
 
-    const traverse = (
-      node: RouteNode,
-      segments: string[] = []
-    ) => {
+    const traverse = (node: RouteNode, parts: string[] = []) => {
       if (node.routeHandler) {
-        const fullPath = '/' + segments.filter(Boolean).join('/');
-        routes.push({ path: fullPath });
+        const path = '/' + parts.filter(Boolean).join('/');
+        routes.push({ path });
       }
       for (const child of node.children.values()) {
-        traverse(child, [...segments, child.segment]);
+        traverse(child, [...parts, child.segment]);
       }
     };
 
