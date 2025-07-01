@@ -20,7 +20,6 @@ function toRoutePath(filePath: string): string {
   const relPath = filePath.replace(pagesDir, "").replace(/\.tsx$/, "");
   const segments = relPath.split(sep).filter(Boolean);
 
-  // Fix homepage route
   if (segments.length === 1 && segments[0] === "index") {
     return "/";
   }
@@ -29,7 +28,9 @@ function toRoutePath(filePath: string): string {
     "/" +
     segments
       .map((seg) =>
-        seg.startsWith("[") && seg.endsWith("]") ? `:${seg.slice(1, -1)}` : seg
+        seg.startsWith("[") && seg.endsWith("]")
+          ? `:${seg.slice(1, -1)}`
+          : seg
       )
       .join("/")
   );
@@ -46,8 +47,15 @@ for (const filePath of walk(pagesDir)) {
   router.addRoute(
     routePath,
     async () => {
-      const { default: Component } = await import(pathToFileURL(filePath).href);
-      return React.createElement(Component);
+      try {
+        console.log(`⏳ Loading component for route: ${routePath}`);
+        const { default: Component } = await import(pathToFileURL(filePath).href);
+        console.log(`✅ Loaded component for route: ${routePath}`);
+        return React.createElement(Component);
+      } catch (e) {
+        console.error(`❌ Error loading component for ${routePath}:`, e);
+        throw e;
+      }
     },
     { isLayout, isGroup }
   );
