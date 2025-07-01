@@ -1,4 +1,5 @@
 // pages/users/[id].tsx
+import React from 'react';
 
 type Props = {
   params: { id: string };

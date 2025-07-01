@@ -14,7 +14,7 @@ const shellStart = encoder.encode(
 );
 
 const shellEnd = encoder.encode(
-  '</div><script src="/client-hydrate.js" async></script></body></html>'
+  '</div></body></html>'
 );
 
 // Async generator: yield shell + stream chunks + shell end
