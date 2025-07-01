@@ -2,7 +2,7 @@ import { readdirSync, statSync } from "fs";
 import path from "path";
 import { router } from "./router";
 
-// Recursively register routes from /pages
+// Recursively get all .tsx files from /pages
 const pagesDir = path.join(process.cwd(), "pages");
 
 function walk(dir: string): string[] {
@@ -18,18 +18,31 @@ function walk(dir: string): string[] {
 function toRoutePath(filePath: string): string {
   const relPath = filePath.replace(pagesDir, "").replace(/\.tsx$/, "");
   const segments = relPath.split(path.sep).filter(Boolean);
+
   return (
     "/" +
     segments
-      .map((seg) => (seg.startsWith("[") && seg.endsWith("]") ? `:${seg.slice(1, -1)}` : seg))
+      .map((seg) =>
+        seg.startsWith("[") && seg.endsWith("]")
+          ? `:${seg.slice(1, -1)}`
+          : seg
+      )
       .join("/")
   );
 }
 
 for (const filePath of walk(pagesDir)) {
   const routePath = toRoutePath(filePath);
-  router.add("GET", routePath, async () => {
-    const { default: Component } = await import(filePath);
-    return <Component />;
-  });
+  const fileName = path.basename(filePath);
+  const isLayout = fileName === "_layout.tsx";
+  const isGroup = filePath.includes(`${path.sep}(`); // folders like /(auth)
+
+  router.addRoute(
+    routePath,
+    async () => {
+      const { default: Component } = await import(filePath);
+      return <Component />;
+    },
+    { isLayout, isGroup }
+  );
 }
