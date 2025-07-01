@@ -20,83 +20,76 @@ async function runServer() {
   await preloadAll();
   trackColdStart(bootStart);
 
-  const server = http2.createServer(async (req, res) => {
+  const server = http2.createServer();
+
+  server.on('stream', async (stream, headers) => {
     const reqStart = Date.now();
+
     try {
-      if (!req.headers[':method'] || !req.headers[':path']) {
-        res.statusCode = 400;
-        return res.end('Bad Request');
+      const method = headers[':method'];
+      const path = headers[':path'];
+      const authority = headers[':authority'];
+
+      if (!method || !path) {
+        stream.respond({ ':status': 400 });
+        return stream.end('Bad Request');
       }
 
-      const method = req.headers[':method'];
-      const url = new URL(req.headers[':path'], `https://${req.headers[':authority']}`);
-
-      // Convert to Fetch API Request
+      const url = new URL(path, `https://${authority}`);
       const fetchRequest = new Request(url.toString(), {
         method,
-        headers: req.headers as HeadersInit,
+        headers: headers as HeadersInit,
         body:
           method === 'GET' || method === 'HEAD'
             ? null
-            : (Readable.toWeb(req) as unknown as ReadableStream<Uint8Array>),
+            : (Readable.toWeb(stream) as unknown as ReadableStream<Uint8Array>),
       });
 
-      // Try static first
+      // Try static
       const staticResponse = await serveStatic(fetchRequest);
       if (staticResponse) {
-        res.statusCode = staticResponse.status;
-        for (const [key, value] of staticResponse.headers) {
-          res.setHeader(key, value);
+        const { status, headers: resHeaders, body } = staticResponse;
+        stream.respond(
+          Object.fromEntries(resHeaders.entries()) as http2.OutgoingHttpHeaders
+        );
+        if (body) {
+          const readable = Readable.fromWeb(body);
+          readable.pipe(stream);
+        } else {
+          stream.end();
         }
-        if (staticResponse.body) {
-          const nodeStream = Readable.fromWeb(staticResponse.body);
-          nodeStream.pipe(res);
-          nodeStream.once('end', () => res.end());
-          return;
-        }
-        res.end();
         return;
       }
 
-      // Dynamic routing
-      const routeMatch = router.match(url.pathname, method);
-
+      const routeMatch = await router.match(url.pathname);
       if (!routeMatch) {
-        res.statusCode = 404;
-        res.setHeader('Content-Type', 'text/plain');
-        return res.end('Not Found');
+        stream.respond({ ':status': 404, 'content-type': 'text/plain' });
+        return stream.end('Not Found');
       }
 
       profilerStart();
 
-      const response = await renderRSC({ route: routeMatch, req: fetchRequest });
+      const response = await router.render(fetchRequest, url.pathname);
 
       profilerStop();
 
-      if (!response.headers.has('Content-Type')) {
-        response.headers.set('Content-Type', 'text/html');
-      }
-
-      res.statusCode = response.status;
-      for (const [key, value] of response.headers) {
-        res.setHeader(key, value);
-      }
+      const resHeaders: http2.OutgoingHttpHeaders = {};
+      response.headers.forEach((v, k) => (resHeaders[k] = v));
+      stream.respond({ ':status': response.status, ...resHeaders });
 
       if (response.body) {
-        const nodeStream = Readable.fromWeb(response.body);
-        nodeStream.pipe(res);
-        nodeStream.once('end', () => res.end());
+        const readable = Readable.fromWeb(response.body);
+        readable.pipe(stream);
       } else {
-        res.end();
+        stream.end();
       }
     } catch (err) {
-      console.error('❌ Server error:', err);
-      res.statusCode = 500;
-      res.setHeader('Content-Type', 'text/plain');
-      res.end('Internal Server Error');
+      console.error('❌ Handler error:', err);
+      stream.respond({ ':status': 500, 'content-type': 'text/plain' });
+      stream.end('Internal Server Error');
     } finally {
       const duration = Date.now() - reqStart;
-      console.log(`📡 [${req.headers[':method']}] ${req.headers[':path']} - ${duration}ms`);
+      console.log(`📡 [${headers[':method']}] ${headers[':path']} - ${duration}ms`);
     }
   });
 
@@ -105,26 +98,30 @@ async function runServer() {
   });
 
   server.on('error', (err) => {
-    console.error('❌ Server error:', err);
+    if ((err as NodeJS.ErrnoException).code === 'EADDRINUSE') {
+      console.error(`❌ Port ${port} already in use`);
+    } else {
+      console.error('❌ Server error:', err);
+    }
     process.exit(1);
   });
 
   logMetrics(bootStart);
 }
 
-if (cluster.isMaster) {
+if (cluster.isPrimary) {
   const numCPUs = os.cpus().length;
-  console.log(`🚀 Master ${process.pid} is running`);
+  console.log(`🧠 Master ${process.pid} running with ${numCPUs} workers`);
   for (let i = 0; i < numCPUs; i++) {
     cluster.fork();
   }
   cluster.on('exit', (worker) => {
-    console.log(`⚠️ Worker ${worker.process.pid} died. Restarting...`);
+    console.warn(`⚠️ Worker ${worker.process.pid} died. Restarting...`);
     cluster.fork();
   });
 } else {
   runServer().catch((err) => {
-    console.error('❌ Fatal error during server startup:', err);
+    console.error('❌ Fatal startup error:', err);
     process.exit(1);
   });
 }
