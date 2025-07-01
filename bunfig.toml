@@ -1,0 +1,33 @@
+# bunfig.toml - Bun config optimized for blazing fast React Server Components app
+
+[server]
+port = 3000
+fetch = "framework/start.ts"  # Entry server file
+
+[build]
+# Enable incremental build for faster rebuilds during dev
+incremental = true
+
+# Enable source maps for easier debugging (turn off in prod for max perf)
+sourcemap = true
+
+[log]
+level = "info"
+
+[watch]
+# Watch these folders for hot reload in dev mode
+paths = ["framework", "pages", "public"]
+
+[cache]
+# Cache node_modules and bun.lockb aggressively for fastest startup
+enabled = true
+directory = ".bun_cache"
+
+[optimize]
+# Enable aggressive minification and tree shaking in prod builds
+minify = true
+treeshake = true
+
+[experimental]
+# Enable experimental features if needed (e.g. streaming)
+streaming = true
