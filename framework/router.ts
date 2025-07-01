@@ -192,6 +192,27 @@ export class UltraRouter {
 
     return response;
   }
+
+  // ✅ New method to support preload and dev tools
+  getAllRoutes(): { path: string }[] {
+    const routes: { path: string }[] = [];
+
+    const traverse = (
+      node: RouteNode,
+      segments: string[] = []
+    ) => {
+      if (node.routeHandler) {
+        const fullPath = '/' + segments.filter(Boolean).join('/');
+        routes.push({ path: fullPath });
+      }
+      for (const child of node.children.values()) {
+        traverse(child, [...segments, child.segment]);
+      }
+    };
+
+    traverse(this.root);
+    return routes;
+  }
 }
 
 export const router = new UltraRouter();
