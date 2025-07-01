@@ -1,157 +1,158 @@
-type RouteHandler = (req: Request, params: Record<string, string>) => Promise<Response> | Response;
+type RouteHandler = (req: Request, params: Record<string, string>, childResponse?: Response) => Promise<Response> | Response;
+type MiddlewareNext = () => Promise<void>;
+type Middleware = (req: Request, params: Record<string, string>, next: MiddlewareNext) => Promise<void> | void;
 
-type Route = {
-  path: string;
+interface RouteNode {
+  segment: string;
   isDynamic: boolean;
-  regex?: RegExp;
-  paramNames?: string[];
-  handler: RouteHandler;
-};
-
-type TrieNode = {
-  children: Map<string, TrieNode>;
-  route?: Route;
-  paramName?: string; // For param segment nodes (like ":id")
-};
-
-class Router {
-  private staticRoutes: Map<string, Map<string, Route>> = new Map(); // method -> (path -> route)
-  private dynamicTries: Map<string, TrieNode> = new Map(); // method -> trie root node
-
-  add(method: string, path: string, handler: RouteHandler) {
-    method = method.toUpperCase();
-
-    if (!this.staticRoutes.has(method)) this.staticRoutes.set(method, new Map());
-    if (!this.dynamicTries.has(method)) this.dynamicTries.set(method, this.createTrieNode());
-
-    const isDynamic = path.includes(':');
-
-    if (!isDynamic) {
-      // Static route: direct map for O(1) lookup
-      this.staticRoutes.get(method)!.set(path, { path, isDynamic, handler });
-      return;
-    }
-
-    // Dynamic route: create regex and param names, then insert in trie
-    const segments = path.split('/').filter(Boolean);
-    const paramNames: string[] = [];
-    const regexStr = segments
-      .map(seg => {
-        if (seg.startsWith(':')) {
-          paramNames.push(seg.slice(1));
-          return '([^/]+)'; // Match any non-slash chars for param
-        }
-        return seg.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); // Escape regex specials
-      })
-      .join('/');
-    const regex = new RegExp(`^/${regexStr}$`);
-
-    const route: Route = { path, isDynamic: true, regex, paramNames, handler };
-
-    this.insertIntoTrie(this.dynamicTries.get(method)!, segments, paramNames, route);
-  }
-
-  private createTrieNode(): TrieNode {
-    return { children: new Map() };
-  }
-
-  private insertIntoTrie(root: TrieNode, segments: string[], paramNames: string[], route: Route) {
-    let node = root;
-    for (const seg of segments) {
-      const key = seg.startsWith(':') ? ':' : seg;
-      if (!node.children.has(key)) {
-        node.children.set(key, this.createTrieNode());
-      }
-      node = node.children.get(key)!;
-      if (key === ':') {
-        node.paramName = seg.slice(1);
-      }
-    }
-    node.route = route;
-  }
-
-  match(pathname: string, method: string): { handler: RouteHandler; params: Record<string, string> } | null {
-    method = method.toUpperCase();
-
-    // 1) Check static routes first (fast path)
-    const staticRoute = this.staticRoutes.get(method)?.get(pathname);
-    if (staticRoute) {
-      return { handler: staticRoute.handler, params: {} };
-    }
-
-    // 2) Match dynamic routes via trie
-    const trieRoot = this.dynamicTries.get(method);
-    if (!trieRoot) return null;
-
-    const segments = pathname.split('/').filter(Boolean);
-    const params: Record<string, string> = {};
-
-    const matchedRoute = this.matchInTrie(trieRoot, segments, 0, params);
-    if (matchedRoute) {
-      // Decode URI components for params
-      for (const key in params) {
-        params[key] = decodeURIComponent(params[key]);
-      }
-      return { handler: matchedRoute.handler, params };
-    }
-
-    return null;
-  }
-
-  private matchInTrie(node: TrieNode, segments: string[], index: number, params: Record<string, string>): Route | null {
-    if (index === segments.length) {
-      return node.route ?? null;
-    }
-
-    const seg = segments[index];
-
-    // Try exact segment child first
-    const exactChild = node.children.get(seg);
-    if (exactChild) {
-      const found = this.matchInTrie(exactChild, segments, index + 1, params);
-      if (found) return found;
-    }
-
-    // Then try param child (':')
-    const paramChild = node.children.get(':');
-    if (paramChild && paramChild.paramName) {
-      params[paramChild.paramName] = seg;
-      const found = this.matchInTrie(paramChild, segments, index + 1, params);
-      if (found) return found;
-      // Backtrack param if no match
-      delete params[paramChild.paramName];
-    }
-
-    return null;
-  }
-
-  // Get all registered routes (static + dynamic)
-  getAllRoutes(): Route[] {
-    const all: Route[] = [];
-
-    // Collect all static routes
-    for (const methodRoutes of this.staticRoutes.values()) {
-      for (const route of methodRoutes.values()) {
-        all.push(route);
-      }
-    }
-
-    // Collect all dynamic routes by traversing tries
-    for (const trieRoot of this.dynamicTries.values()) {
-      this.collectTrieRoutes(trieRoot, all);
-    }
-
-    return all;
-  }
-
-  private collectTrieRoutes(node: TrieNode, collector: Route[]) {
-    if (node.route) {
-      collector.push(node.route);
-    }
-    for (const child of node.children.values()) {
-      this.collectTrieRoutes(child, collector);
-    }
-  }
+  paramName?: string;
+  children: Map<string, RouteNode>;
+  routeHandler?: RouteHandler;
+  layoutHandler?: RouteHandler;
+  middleware: Middleware[];
+  isLayout: boolean;
+  isGroup: boolean;
+  parent?: RouteNode;
+  isCatchAll: boolean;
 }
 
-export const router = new Router();
+class UltraRouter {
+  root: RouteNode = this.createNode('', false);
+
+  private createNode(segment: string, isDynamic: boolean = false, paramName?: string): RouteNode {
+    return {
+      segment,
+      isDynamic,
+      paramName,
+      children: new Map(),
+      middleware: [],
+      isLayout: false,
+      isGroup: false,
+      isCatchAll: false,
+    };
+  }
+
+  addRoute(path: string, handler: RouteHandler, options: { isLayout?: boolean, isGroup?: boolean, middleware?: Middleware[] } = {}) {
+    const segments = this.parseSegments(path);
+    let node = this.root;
+
+    for (const seg of segments) {
+      let child = node.children.get(seg.segment);
+      if (!child) {
+        child = this.createNode(seg.segment, seg.isDynamic, seg.paramName);
+        child.isCatchAll = seg.isCatchAll;
+        node.children.set(seg.segment, child);
+        child.parent = node;
+      }
+      node = child;
+    }
+
+    if (options.isGroup) node.isGroup = true;
+    if (options.isLayout) node.isLayout = true;
+    if (options.middleware) node.middleware.push(...options.middleware);
+    if (options.isLayout) node.layoutHandler = handler;
+    else node.routeHandler = handler;
+  }
+
+  parseSegments(path: string): { segment: string, isDynamic: boolean, paramName?: string, isCatchAll: boolean }[] {
+    return path.split('/').filter(Boolean).map(seg => {
+      if (seg.startsWith('(') && seg.endsWith(')')) {
+        // route group - segment ignored in URL but kept in tree
+        return { segment: seg, isDynamic: false, isCatchAll: false };
+      }
+      if (seg.startsWith(':')) return { segment: seg, isDynamic: true, paramName: seg.slice(1), isCatchAll: false };
+      if (seg.startsWith('*')) return { segment: seg, isDynamic: true, paramName: seg.slice(1), isCatchAll: true };
+      return { segment: seg, isDynamic: false, isCatchAll: false };
+    });
+  }
+
+  async runMiddleware(req: Request, params: Record<string, string>, middleware: Middleware[]) {
+    let idx = 0;
+    const next = async () => {
+      if (idx < middleware.length) {
+        await middleware[idx++](req, params, next);
+      }
+    };
+    await next();
+  }
+
+  // Match and extract params (support groups and catch-all)
+  match(pathname: string) {
+    const segments = pathname.split('/').filter(Boolean);
+    const params: Record<string, string> = {};
+    const match = this.matchNode(this.root, segments, 0, params);
+    if (!match) return null;
+
+    // collect layouts chain and route
+    const layouts: RouteNode[] = [];
+    let node: RouteNode | undefined = match.node;
+    while (node) {
+      if (node.isLayout) layouts.unshift(node);
+      node = node.parent;
+    }
+
+    return { routeNode: match.node, params, layouts };
+  }
+
+  private matchNode(node: RouteNode, segments: string[], idx: number, params: Record<string, string>): { node: RouteNode, params: Record<string, string> } | null {
+    if (idx === segments.length) {
+      if (node.routeHandler) return { node, params };
+      // catch-all optional match?
+      return null;
+    }
+
+    const seg = segments[idx];
+
+    // Try exact child (ignore groups in URL)
+    for (const child of node.children.values()) {
+      if (child.isGroup) continue; // skip groups for URL matching
+
+      if (!child.isDynamic && child.segment === seg) {
+        const res = this.matchNode(child, segments, idx + 1, params);
+        if (res) return res;
+      }
+    }
+
+    // Try dynamic children
+    for (const child of node.children.values()) {
+      if (child.isDynamic) {
+        params[child.paramName!] = seg;
+        const res = this.matchNode(child, segments, idx + 1, params);
+        if (res) return res;
+        delete params[child.paramName!];
+      }
+    }
+
+    // Try catch-all dynamic
+    for (const child of node.children.values()) {
+      if (child.isCatchAll) {
+        params[child.paramName!] = segments.slice(idx).join('/');
+        if (child.routeHandler) return { node: child, params };
+        delete params[child.paramName!];
+      }
+    }
+
+    return null;
+  }
+
+  async render(req: Request, pathname: string): Promise<Response | null> {
+    const matched = this.match(pathname);
+    if (!matched) return null;
+
+    // Run middleware for all layouts + route in order
+    for (const layoutNode of matched.layouts) {
+      await this.runMiddleware(req, {}, layoutNode.middleware);
+    }
+    await this.runMiddleware(req, matched.params, matched.routeNode.middleware);
+
+    // Render leaf route handler first
+    let response = await matched.routeNode.routeHandler!(req, matched.params);
+
+    // Wrap with layouts from inner to outer
+    for (const layoutNode of matched.layouts.reverse()) {
+      response = await layoutNode.layoutHandler!(req, matched.params, response);
+    }
+
+    return response;
+  }
+}
