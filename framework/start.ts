@@ -1,3 +1,4 @@
+// optimized-start.ts
 import fs from 'fs';
 import path from 'path';
 import http from 'http';
@@ -10,6 +11,7 @@ import { preloadAll } from './preload';
 import { logMetrics } from './metrics';
 import { env } from './env';
 import { serveStatic } from './serveStatic';
+import zlib from 'zlib';
 
 import './routes';
 
@@ -17,9 +19,20 @@ const bootStart = Date.now();
 const port = env.PORT ?? 3000;
 const isDev = process.env.NODE_ENV !== 'production';
 
-async function handler(req: http.IncomingMessage | http2.Http2ServerRequest, res: http.ServerResponse | http2.Http2ServerResponse) {
-  const reqStart = Date.now();
+function logRequest(method: string, url: string, duration: number) {
+  const mem = process.memoryUsage();
+  console.log(
+    `⏱️ ${method} ${url} - ${duration}ms | Heap: ${(mem.heapUsed / 1024 / 1024).toFixed(
+      2
+    )} MB | RSS: ${(mem.rss / 1024 / 1024).toFixed(2)} MB`
+  );
+}
 
+async function handler(
+  req: http.IncomingMessage | http2.Http2ServerRequest,
+  res: http.ServerResponse | http2.Http2ServerResponse
+) {
+  const reqStart = Date.now();
   try {
     const method = 'method' in req ? req.method : req.headers[':method'];
     const path = 'url' in req ? req.url : req.headers[':path'];
@@ -40,11 +53,10 @@ async function handler(req: http.IncomingMessage | http2.Http2ServerRequest, res
           : (Readable.toWeb(req as any) as unknown as ReadableStream<Uint8Array>),
     });
 
-    // Serve static files first
     const staticResponse = await serveStatic(fetchRequest);
     if (staticResponse) {
       res.statusCode = staticResponse.status;
-      for (const [key, value] of staticResponse.headers) {
+      for (const [key, value] of staticResponse.headers.entries()) {
         res.setHeader(key, value);
       }
       if (staticResponse.body) {
@@ -56,7 +68,6 @@ async function handler(req: http.IncomingMessage | http2.Http2ServerRequest, res
       return;
     }
 
-    // Use router.render() instead of manual match + renderRSC
     const response = await router.render(fetchRequest, url.pathname);
 
     if (!response) {
@@ -66,12 +77,25 @@ async function handler(req: http.IncomingMessage | http2.Http2ServerRequest, res
     }
 
     res.statusCode = response.status;
-    for (const [key, value] of response.headers) {
+    for (const [key, value] of response.headers.entries()) {
       res.setHeader(key, value);
     }
 
+    // Add default headers if not present
+    if (!res.getHeader('Cache-Control')) {
+      res.setHeader('Cache-Control', 'public, max-age=3600, stale-while-revalidate=60');
+    }
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('X-XSS-Protection', '1; mode=block');
+
     if (response.body) {
-      const stream = Readable.fromWeb(response.body);
+      let stream = Readable.fromWeb(response.body);
+      // Optional: Compress
+      if (response.headers.get('Content-Type')?.includes('text')) {
+        res.setHeader('Content-Encoding', 'gzip');
+        stream = stream.pipe(zlib.createGzip());
+      }
       stream.pipe(res as any);
     } else {
       res.end();
@@ -85,7 +109,7 @@ async function handler(req: http.IncomingMessage | http2.Http2ServerRequest, res
     const duration = Date.now() - reqStart;
     const method = 'method' in req ? req.method : req.headers[':method'];
     const path = 'url' in req ? req.url : req.headers[':path'];
-    console.log(`📡 ${method} ${path} - ${duration}ms`);
+    logRequest(method ?? 'UNKNOWN', path ?? 'UNKNOWN', duration);
   }
 }
 
