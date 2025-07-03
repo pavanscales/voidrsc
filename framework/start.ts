@@ -61,8 +61,10 @@ async function handler(
       const staticResponse = await serveStatic(fetchRequest);
       if (staticResponse) {
         res.statusCode = staticResponse.status;
-        for (const [key, value] of staticResponse.headers.entries()) {
-          res.setHeader(key, value);
+        if (staticResponse.headers && typeof staticResponse.headers.entries === 'function') {
+          for (const [key, value] of staticResponse.headers.entries()) {
+            res.setHeader(key, value);
+          }
         }
         if (staticResponse.body) {
           try {
@@ -83,7 +85,7 @@ async function handler(
 
     // Route matching
     const response = await router.render(fetchRequest, url.pathname);
-    console.log('📡 router.render returned:', response?.status);
+    console.log('📡 router.render returned:', response?.status ?? 'undefined');
 
     if (!response) {
       res.statusCode = 404;
@@ -91,9 +93,13 @@ async function handler(
       return res.end('Not Found');
     }
 
-    res.statusCode = response.status;
-    for (const [key, value] of response.headers.entries()) {
-      res.setHeader(key, value);
+    res.statusCode = typeof response.status === 'number' ? response.status : 200;
+
+    // ✅ Safe header handling
+    if (response.headers && typeof response.headers.entries === 'function') {
+      for (const [key, value] of response.headers.entries()) {
+        res.setHeader(key, value);
+      }
     }
 
     // Default headers
@@ -107,7 +113,7 @@ async function handler(
     if (response.body) {
       try {
         let stream = Readable.fromWeb(response.body);
-        if (response.headers.get('Content-Type')?.includes('text')) {
+        if (response.headers?.get('Content-Type')?.includes('text')) {
           res.setHeader('Content-Encoding', 'gzip');
           stream = stream.pipe(zlib.createGzip());
         }

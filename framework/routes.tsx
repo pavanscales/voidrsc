@@ -2,6 +2,7 @@ import { readdirSync, statSync } from "fs";
 import path, { sep } from "path";
 import { pathToFileURL } from "url";
 import { router } from "./router";
+import { renderRSC } from "./render"; // ✅ RSC renderer
 import React from "react";
 
 const pagesDir = path.join(process.cwd(), "pages");
@@ -46,12 +47,37 @@ for (const filePath of walk(pagesDir)) {
 
   router.addRoute(
     routePath,
-    async () => {
+    async (req, params) => {
       try {
         console.log(`⏳ Loading component for route: ${routePath}`);
         const { default: Component } = await import(pathToFileURL(filePath).href);
         console.log(`✅ Loaded component for route: ${routePath}`);
-        return React.createElement(Component);
+
+        const element = React.createElement(Component, { params });
+
+        // ⬇️ Inject layout wrappers
+        const match = router.match(routePath);
+        const layouts = [];
+
+        if (match) {
+          for (const layoutNode of match.layouts) {
+            if (layoutNode.layoutHandler) {
+              const layoutComponent = await layoutNode.layoutHandler(req, params);
+              layouts.push((child: React.ReactNode) =>
+                React.createElement(layoutComponent as any, { children: child, params })
+              );
+            }
+          }
+        }
+
+        (globalThis as any)._layouts = layouts;
+
+        return renderRSC({
+          route: {
+            handler: () => element,
+          },
+          req,
+        });
       } catch (e) {
         console.error(`❌ Error loading component for ${routePath}:`, e);
         throw e;

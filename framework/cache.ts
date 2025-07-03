@@ -1,43 +1,37 @@
-// framework/cache.ts
-
 type CacheEntry = {
   key: string;
-  value: Response;
-  timestamp: number; // for TTL expiration
+  value: Uint8Array;
+  timestamp: number;
   prev?: CacheEntry;
   next?: CacheEntry;
 };
 
 export class LRUCache {
   private maxSize: number;
-  private ttl: number; // milliseconds
+  private ttl: number;
   private cacheMap: Map<string, CacheEntry>;
   private head?: CacheEntry;
   private tail?: CacheEntry;
   private currentSize: number;
 
-  // Metrics
   public hits = 0;
   public misses = 0;
-
-  // Enable logging on evictions (disable in prod)
   private logEvictions = false;
 
-  constructor(maxSize = 1000, ttl = 1000 * 60 * 5 /*5 mins*/) {
+  constructor(maxSize = 1000, ttl = 5 * 60 * 1000) {
     this.maxSize = maxSize;
     this.ttl = ttl;
     this.cacheMap = new Map();
     this.currentSize = 0;
   }
 
-  get(key: string): Response | undefined {
+  get(key: string): Uint8Array | undefined {
     const entry = this.cacheMap.get(key);
     if (!entry) {
       this.misses++;
       return undefined;
     }
 
-    // Check TTL expiration
     if (Date.now() - entry.timestamp > this.ttl) {
       this.evictEntry(entry);
       this.misses++;
@@ -46,24 +40,14 @@ export class LRUCache {
 
     this.hits++;
     this.moveToHead(entry);
-    return entry.value.clone();
+    return entry.value;
   }
 
-  async set(key: string, value: Response): Promise<void> {
-    // Clone response body fully to avoid locking issues
-    const cloned = value.clone();
-    const body = await cloned.text();
-
-    const cachedResponse = new Response(body, {
-      status: value.status,
-      statusText: value.statusText,
-      headers: value.headers,
-    });
-
+  async set(key: string, data: Uint8Array): Promise<void> {
     let entry = this.cacheMap.get(key);
 
     if (entry) {
-      entry.value = cachedResponse;
+      entry.value = data;
       entry.timestamp = Date.now();
       this.moveToHead(entry);
       return;
@@ -71,7 +55,7 @@ export class LRUCache {
 
     entry = {
       key,
-      value: cachedResponse,
+      value: data,
       timestamp: Date.now(),
     };
 
@@ -94,8 +78,9 @@ export class LRUCache {
   }
 
   private evictTail() {
-    if (!this.tail) return;
-    this.evictEntry(this.tail);
+    if (this.tail) {
+      this.evictEntry(this.tail);
+    }
   }
 
   private moveToHead(entry: CacheEntry) {
@@ -120,26 +105,24 @@ export class LRUCache {
     else this.tail = entry.prev;
   }
 
-  // Utility to toggle eviction logging (for debugging only)
   toggleEvictionLogging(enable: boolean) {
     this.logEvictions = enable;
   }
 
-  // Reset metrics
   resetMetrics() {
     this.hits = 0;
     this.misses = 0;
   }
 }
 
-export const cache = new LRUCache(1000, 5 * 60 * 1000); // 1000 max entries, 5 min TTL
+// ✅ Singleton cache instance
+export const cache = new LRUCache(1000, 5 * 60 * 1000);
 
-// Cache helpers for ease of use
-
-export async function cacheResponse(key: string, res: Response) {
-  await cache.set(key, res);
+// ✅ Helper methods
+export async function cacheResponse(key: string, data: Uint8Array) {
+  await cache.set(key, data);
 }
 
-export function getCachedResponse(key: string): Response | undefined {
+export function getCachedResponse(key: string): Uint8Array | undefined {
   return cache.get(key);
 }

@@ -1,6 +1,4 @@
-/**
- * UltraRouter: Edge-Case Safe, 100K Route Scale
- */
+import { renderRSC } from './render'; // 👈 Make sure this path is correct
 
 type RouteHandler = (
   req: Request,
@@ -30,7 +28,7 @@ interface RouteNode {
 }
 
 class UltraRouter {
-  private root: RouteNode = this.createNode('', false);
+  private root: RouteNode = this.createNode("");
 
   private createNode(segment: string, isDynamic = false, paramName?: string): RouteNode {
     return {
@@ -60,7 +58,6 @@ class UltraRouter {
     for (const seg of segments) {
       let child = node.children.get(seg.segment);
 
-      // Catch-all validation (only one allowed per node)
       if (seg.isCatchAll) {
         for (const c of node.children.values()) {
           if (c.isCatchAll) {
@@ -96,21 +93,18 @@ class UltraRouter {
 
   private parseSegments(path: string) {
     return path
-      .split('/')
+      .split("/")
       .filter(Boolean)
       .map((seg) => {
-        if (seg.startsWith('(') && seg.endsWith(')')) {
-          if (seg.includes('(') && seg.includes(')') && seg.match(/\(.+\)/)) {
-            return { segment: seg, isDynamic: false, isCatchAll: false };
-          }
-          throw new Error(`Malformed group segment: ${seg}`);
+        if (seg.startsWith("(") && seg.endsWith(")")) {
+          return { segment: seg, isDynamic: false, isCatchAll: false };
         }
-        if (seg.startsWith('*')) {
+        if (seg.startsWith("*")) {
           const name = seg.slice(1);
           if (!name) throw new Error(`Catch-all must have param name: ${seg}`);
           return { segment: seg, isDynamic: true, paramName: name, isCatchAll: true };
         }
-        if (seg.startsWith(':')) {
+        if (seg.startsWith(":")) {
           const name = seg.slice(1);
           if (!name) throw new Error(`Dynamic segment must have param name: ${seg}`);
           return { segment: seg, isDynamic: true, paramName: name, isCatchAll: false };
@@ -129,22 +123,17 @@ class UltraRouter {
       if (i >= middleware.length) return;
       const fn = middleware[i++];
       let called = false;
-      try {
-        await fn(req, params, async () => {
-          if (called) throw new Error('`next()` called multiple times in middleware');
-          called = true;
-          await next();
-        });
-      } catch (err) {
-        console.error(`Middleware error:`, err);
-        throw err;
-      }
+      await fn(req, params, async () => {
+        if (called) throw new Error("`next()` called multiple times in middleware");
+        called = true;
+        await next();
+      });
     };
     await next();
   }
 
   match(pathname: string) {
-    const segments = pathname.split('/').filter(Boolean);
+    const segments = pathname.split("/").filter(Boolean);
     const params: Record<string, string> = {};
     const match = this.matchNode(this.root, segments, 0, params);
     if (!match) return null;
@@ -191,7 +180,7 @@ class UltraRouter {
 
     for (const child of node.children.values()) {
       if (child.isCatchAll && child.paramName) {
-        params[child.paramName] = segments.slice(index).join('/');
+        params[child.paramName] = segments.slice(index).join("/");
         if (child.routeHandler) return { node: child, params };
         delete params[child.paramName];
       }
@@ -215,18 +204,16 @@ class UltraRouter {
         throw new Error(`No route handler defined for path: ${pathname}`);
       }
 
-      let response = await matched.routeNode.routeHandler(req, matched.params);
-
-      for (const layout of matched.layouts.reverse()) {
-        if (layout.layoutHandler) {
-          response = await layout.layoutHandler(req, matched.params, response);
-        }
-      }
-
-      return response;
-    } catch (err) {
+      // ✅ FIX: renderRSC instead of manual layout wrapping
+      return await renderRSC({
+        route: {
+          handler: (req) => matched.routeNode.routeHandler!(req, matched.params),
+        },
+        req,
+      });
+    } catch (err: any) {
       console.error(`Render error for ${pathname}:`, err);
-      return new Response('Internal Server Error', { status: 500 });
+      return new Response("Internal Server Error", { status: 500 });
     }
   }
 
@@ -234,7 +221,7 @@ class UltraRouter {
     const routes: { path: string }[] = [];
     const traverse = (node: RouteNode, parts: string[] = []) => {
       if (node.routeHandler) {
-        const path = '/' + parts.filter(Boolean).join('/');
+        const path = "/" + parts.filter(Boolean).join("/");
         routes.push({ path });
       }
       for (const child of node.children.values()) {
@@ -246,6 +233,5 @@ class UltraRouter {
   }
 }
 
-// ✅ ESM-friendly export (fixes your error)
 const router = new UltraRouter();
 export { UltraRouter, router };
