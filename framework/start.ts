@@ -33,17 +33,20 @@ async function handler(
   res: http.ServerResponse | http2.Http2ServerResponse
 ) {
   const reqStart = Date.now();
+
   try {
     const method = 'method' in req ? req.method : req.headers[':method'];
-    const path = 'url' in req ? req.url : req.headers[':path'];
+    const rawPath = 'url' in req ? req.url : req.headers[':path'];
     const host = 'headers' in req && 'host' in req.headers ? req.headers.host : req.headers[':authority'];
 
-    if (!method || !path || !host) {
+    console.log('📥 Request:', { method, rawPath, host });
+
+    if (!method || !rawPath || !host) {
       res.statusCode = 400;
       return res.end('Bad Request');
     }
 
-    const url = new URL(path!, `http://${host}`);
+    const url = new URL(rawPath!, `http://${host}`);
     const fetchRequest = new Request(url.toString(), {
       method,
       headers: req.headers as HeadersInit,
@@ -53,22 +56,34 @@ async function handler(
           : (Readable.toWeb(req as any) as unknown as ReadableStream<Uint8Array>),
     });
 
-    const staticResponse = await serveStatic(fetchRequest);
-    if (staticResponse) {
-      res.statusCode = staticResponse.status;
-      for (const [key, value] of staticResponse.headers.entries()) {
-        res.setHeader(key, value);
+    // Serve static assets
+    try {
+      const staticResponse = await serveStatic(fetchRequest);
+      if (staticResponse) {
+        res.statusCode = staticResponse.status;
+        for (const [key, value] of staticResponse.headers.entries()) {
+          res.setHeader(key, value);
+        }
+        if (staticResponse.body) {
+          try {
+            const stream = Readable.fromWeb(staticResponse.body);
+            stream.pipe(res as any);
+          } catch (err) {
+            console.error('❌ Stream error (static):', err);
+            res.end();
+          }
+        } else {
+          res.end();
+        }
+        return;
       }
-      if (staticResponse.body) {
-        const stream = Readable.fromWeb(staticResponse.body);
-        stream.pipe(res as any);
-      } else {
-        res.end();
-      }
-      return;
+    } catch (err) {
+      console.error('❌ serveStatic failed:', err);
     }
 
+    // Route matching
     const response = await router.render(fetchRequest, url.pathname);
+    console.log('📡 router.render returned:', response?.status);
 
     if (!response) {
       res.statusCode = 404;
@@ -81,7 +96,7 @@ async function handler(
       res.setHeader(key, value);
     }
 
-    // Add default headers if not present
+    // Default headers
     if (!res.getHeader('Cache-Control')) {
       res.setHeader('Cache-Control', 'public, max-age=3600, stale-while-revalidate=60');
     }
@@ -90,18 +105,23 @@ async function handler(
     res.setHeader('X-XSS-Protection', '1; mode=block');
 
     if (response.body) {
-      let stream = Readable.fromWeb(response.body);
-      // Optional: Compress
-      if (response.headers.get('Content-Type')?.includes('text')) {
-        res.setHeader('Content-Encoding', 'gzip');
-        stream = stream.pipe(zlib.createGzip());
+      try {
+        let stream = Readable.fromWeb(response.body);
+        if (response.headers.get('Content-Type')?.includes('text')) {
+          res.setHeader('Content-Encoding', 'gzip');
+          stream = stream.pipe(zlib.createGzip());
+        }
+        stream.pipe(res as any);
+      } catch (err) {
+        console.error('❌ Failed to stream response:', err);
+        res.statusCode = 500;
+        return res.end('Stream error');
       }
-      stream.pipe(res as any);
     } else {
       res.end();
     }
   } catch (err) {
-    console.error('❌ Server error:', err);
+    console.error('❌ Top-level server error:', err);
     res.statusCode = 500;
     res.setHeader('Content-Type', 'text/plain');
     res.end('Internal Server Error');

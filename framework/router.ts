@@ -1,4 +1,6 @@
-// router.ts
+/**
+ * UltraRouter: Edge-Case Safe, 100K Route Scale
+ */
 
 type RouteHandler = (
   req: Request,
@@ -27,14 +29,10 @@ interface RouteNode {
   layoutHandler?: RouteHandler;
 }
 
-export class UltraRouter {
+class UltraRouter {
   private root: RouteNode = this.createNode('', false);
 
-  private createNode(
-    segment: string,
-    isDynamic = false,
-    paramName?: string
-  ): RouteNode {
+  private createNode(segment: string, isDynamic = false, paramName?: string): RouteNode {
     return {
       segment,
       isDynamic,
@@ -61,6 +59,16 @@ export class UltraRouter {
 
     for (const seg of segments) {
       let child = node.children.get(seg.segment);
+
+      // Catch-all validation (only one allowed per node)
+      if (seg.isCatchAll) {
+        for (const c of node.children.values()) {
+          if (c.isCatchAll) {
+            throw new Error(`Only one catch-all route allowed per path segment: "${path}"`);
+          }
+        }
+      }
+
       if (!child) {
         child = this.createNode(seg.segment, seg.isDynamic, seg.paramName);
         child.isCatchAll = seg.isCatchAll;
@@ -68,6 +76,14 @@ export class UltraRouter {
         node.children.set(seg.segment, child);
       }
       node = child;
+    }
+
+    if (options.isLayout && node.layoutHandler) {
+      throw new Error(`Duplicate layout handler defined for path: ${path}`);
+    }
+
+    if (!options.isLayout && node.routeHandler) {
+      throw new Error(`Duplicate route handler defined for path: ${path}`);
     }
 
     node.isGroup = !!options.isGroup;
@@ -83,25 +99,22 @@ export class UltraRouter {
       .split('/')
       .filter(Boolean)
       .map((seg) => {
-        if (seg.startsWith('(') && seg.endsWith(')'))
-          return { segment: seg, isDynamic: false, isCatchAll: false };
-
-        if (seg.startsWith('*'))
-          return {
-            segment: seg,
-            isDynamic: true,
-            paramName: seg.slice(1),
-            isCatchAll: true,
-          };
-
-        if (seg.startsWith(':'))
-          return {
-            segment: seg,
-            isDynamic: true,
-            paramName: seg.slice(1),
-            isCatchAll: false,
-          };
-
+        if (seg.startsWith('(') && seg.endsWith(')')) {
+          if (seg.includes('(') && seg.includes(')') && seg.match(/\(.+\)/)) {
+            return { segment: seg, isDynamic: false, isCatchAll: false };
+          }
+          throw new Error(`Malformed group segment: ${seg}`);
+        }
+        if (seg.startsWith('*')) {
+          const name = seg.slice(1);
+          if (!name) throw new Error(`Catch-all must have param name: ${seg}`);
+          return { segment: seg, isDynamic: true, paramName: name, isCatchAll: true };
+        }
+        if (seg.startsWith(':')) {
+          const name = seg.slice(1);
+          if (!name) throw new Error(`Dynamic segment must have param name: ${seg}`);
+          return { segment: seg, isDynamic: true, paramName: name, isCatchAll: false };
+        }
         return { segment: seg, isDynamic: false, isCatchAll: false };
       });
   }
@@ -112,8 +125,20 @@ export class UltraRouter {
     middleware: Middleware[]
   ) {
     let i = 0;
-    const next = async () => {
-      if (i < middleware.length) await middleware[i++](req, params, next);
+    const next: MiddlewareNext = async () => {
+      if (i >= middleware.length) return;
+      const fn = middleware[i++];
+      let called = false;
+      try {
+        await fn(req, params, async () => {
+          if (called) throw new Error('`next()` called multiple times in middleware');
+          called = true;
+          await next();
+        });
+      } catch (err) {
+        console.error(`Middleware error:`, err);
+        throw err;
+      }
     };
     await next();
   }
@@ -122,7 +147,6 @@ export class UltraRouter {
     const segments = pathname.split('/').filter(Boolean);
     const params: Record<string, string> = {};
     const match = this.matchNode(this.root, segments, 0, params);
-
     if (!match) return null;
 
     const layouts: RouteNode[] = [];
@@ -157,19 +181,19 @@ export class UltraRouter {
     }
 
     for (const child of node.children.values()) {
-      if (child.isDynamic && !child.isCatchAll) {
-        params[child.paramName!] = seg;
+      if (child.isDynamic && !child.isCatchAll && child.paramName) {
+        params[child.paramName] = seg;
         const res = this.matchNode(child, segments, index + 1, params);
         if (res) return res;
-        delete params[child.paramName!];
+        delete params[child.paramName];
       }
     }
 
     for (const child of node.children.values()) {
-      if (child.isCatchAll) {
-        params[child.paramName!] = segments.slice(index).join('/');
+      if (child.isCatchAll && child.paramName) {
+        params[child.paramName] = segments.slice(index).join('/');
         if (child.routeHandler) return { node: child, params };
-        delete params[child.paramName!];
+        delete params[child.paramName];
       }
     }
 
@@ -180,25 +204,34 @@ export class UltraRouter {
     const matched = this.match(pathname);
     if (!matched) return null;
 
-    for (const layout of matched.layouts) {
-      await this.runMiddleware(req, {}, layout.middleware);
+    try {
+      for (const layout of matched.layouts) {
+        await this.runMiddleware(req, matched.params, layout.middleware);
+      }
+
+      await this.runMiddleware(req, matched.params, matched.routeNode.middleware);
+
+      if (!matched.routeNode.routeHandler) {
+        throw new Error(`No route handler defined for path: ${pathname}`);
+      }
+
+      let response = await matched.routeNode.routeHandler(req, matched.params);
+
+      for (const layout of matched.layouts.reverse()) {
+        if (layout.layoutHandler) {
+          response = await layout.layoutHandler(req, matched.params, response);
+        }
+      }
+
+      return response;
+    } catch (err) {
+      console.error(`Render error for ${pathname}:`, err);
+      return new Response('Internal Server Error', { status: 500 });
     }
-
-    await this.runMiddleware(req, matched.params, matched.routeNode.middleware);
-
-    let response = await matched.routeNode.routeHandler!(req, matched.params);
-
-    for (const layout of matched.layouts.reverse()) {
-      response = await layout.layoutHandler!(req, matched.params, response);
-    }
-
-    return response;
   }
 
-  // ✅ Add this for preloadAll
   getAllRoutes(): { path: string }[] {
     const routes: { path: string }[] = [];
-
     const traverse = (node: RouteNode, parts: string[] = []) => {
       if (node.routeHandler) {
         const path = '/' + parts.filter(Boolean).join('/');
@@ -208,10 +241,11 @@ export class UltraRouter {
         traverse(child, [...parts, child.segment]);
       }
     };
-
     traverse(this.root);
     return routes;
   }
 }
 
-export const router = new UltraRouter();
+// ✅ ESM-friendly export (fixes your error)
+const router = new UltraRouter();
+export { UltraRouter, router };
