@@ -113,16 +113,20 @@ function htmlShell(stream: ReadableStream<Uint8Array>): Response {
   });
 }
 
-// --- FIXED createCompressionStream here ---
+// --- Safe compression stream fix ---
 function createCompressionStream(): TransformStream<Uint8Array, Uint8Array> {
   if (typeof CompressionStream !== 'undefined') {
-    // Native browser/node CompressionStream with 'br' support
-    return new CompressionStream('br');
+    try {
+      return new CompressionStream('br');
+    } catch {
+      // 'br' unsupported - fallback to pass-through
+      return new TransformStream();
+    }
   }
-  // Fallback - no compression
-  return new TransformStream(); // pass-through identity
+  // No CompressionStream API - fallback to pass-through
+  return new TransformStream();
 }
-// ------------------------------------------
+// -----------------------------------
 
 async function cacheStream(cacheKey: string, stream: ReadableStream<Uint8Array>) {
   const reader = stream.getReader();
