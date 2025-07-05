@@ -1,4 +1,3 @@
-// renderRSC-dominator.ts
 import React from 'react';
 import { renderToReadableStream } from './rsc';
 import { cache } from './cache';
@@ -114,13 +113,16 @@ function htmlShell(stream: ReadableStream<Uint8Array>): Response {
   });
 }
 
+// --- FIXED createCompressionStream here ---
 function createCompressionStream(): TransformStream<Uint8Array, Uint8Array> {
   if (typeof CompressionStream !== 'undefined') {
+    // Native browser/node CompressionStream with 'br' support
     return new CompressionStream('br');
   }
-  // Fallback: no compression
-  return new TransformStream(); // identity passthrough
+  // Fallback - no compression
+  return new TransformStream(); // pass-through identity
 }
+// ------------------------------------------
 
 async function cacheStream(cacheKey: string, stream: ReadableStream<Uint8Array>) {
   const reader = stream.getReader();
