@@ -1,10 +1,4 @@
-import { renderRSC } from './render'; // 👈 Make sure this path is correct
-
-type RouteHandler = (
-  req: Request,
-  params: Record<string, string>,
-  childResponse?: Response
-) => Promise<Response> | Response;
+import { renderRSC } from './render'; // ✅ Your render function
 
 type MiddlewareNext = () => Promise<void>;
 type Middleware = (
@@ -12,6 +6,15 @@ type Middleware = (
   params: Record<string, string>,
   next: MiddlewareNext
 ) => Promise<void> | void;
+
+type RouteHandler = {
+  handler: (
+    req: Request,
+    params: Record<string, string>,
+    serverData?: any
+  ) => Promise<Response> | Response;
+  getServerData?: (req: Request, params: Record<string, string>) => Promise<any>;
+};
 
 interface RouteNode {
   segment: string;
@@ -72,6 +75,7 @@ class UltraRouter {
         child.parent = node;
         node.children.set(seg.segment, child);
       }
+
       node = child;
     }
 
@@ -204,10 +208,16 @@ class UltraRouter {
         throw new Error(`No route handler defined for path: ${pathname}`);
       }
 
-      // ✅ FIX: renderRSC instead of manual layout wrapping
+      const route = matched.routeNode.routeHandler;
+
       return await renderRSC({
         route: {
-          handler: (req) => matched.routeNode.routeHandler!(req, matched.params),
+          handler: async (req) => {
+            const serverData = route.getServerData
+              ? await route.getServerData(req, matched.params)
+              : undefined;
+            return route.handler(req, matched.params, serverData);
+          },
         },
         req,
       });
