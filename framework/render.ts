@@ -32,7 +32,10 @@ export async function renderRSC({
   route,
   req,
 }: {
-  route: { handler: (req: Request) => Promise<React.ReactNode> };
+  route: {
+    handler: (req: Request, data?: any) => Promise<React.ReactNode>;
+    getServerData?: (req: Request) => Promise<any>;
+  };
   req: Request;
 }): Promise<Response> {
   profiler.start();
@@ -45,7 +48,18 @@ export async function renderRSC({
       return htmlShellBuffer(cachedBuffer);
     }
 
-    let element = await withTimeout(route.handler(req), 2500);
+    // Fetch server data (optional)
+    let serverData: any = undefined;
+    if (route.getServerData) {
+      try {
+        serverData = await withTimeout(route.getServerData(req), 1000);
+      } catch (err) {
+        console.warn('⚠️ getServerData failed:', err);
+      }
+    }
+
+    // Render JSX with serverData
+    let element = await withTimeout(route.handler(req, serverData), 2500);
 
     if (!cachedLayouts) {
       const layouts = (globalThis as any)._layouts as
@@ -63,7 +77,6 @@ export async function renderRSC({
     }
 
     const stream = await withTimeout(renderToReadableStream(element), 1500);
-
     return await streamWithCacheUsingTee(stream, cacheKey);
   } catch (error: any) {
     return error500(error.message);
@@ -115,12 +128,10 @@ async function streamWithCacheUsingTee(
 ): Promise<Response> {
   const [streamForClient, streamForCache] = stream.tee();
 
-  // Start caching asynchronously
   cacheStreamChunks(cacheKey, streamForCache).catch((e) =>
     console.error('Cache write failed:', e)
   );
 
-  // Return response streaming to client
   return htmlShell(streamForClient);
 }
 
@@ -139,7 +150,6 @@ async function cacheStreamChunks(
         chunks.push(value);
         totalSize += value.length;
 
-        // If buffered more than ~100kb, save to cache and clear buffer
         if (totalSize > 100 * 1024) {
           await saveChunksToCache(cacheKey, chunks);
           chunks.length = 0;
@@ -147,7 +157,6 @@ async function cacheStreamChunks(
         }
       }
     }
-    // Save remaining chunks
     if (chunks.length > 0) {
       await saveChunksToCache(cacheKey, chunks);
     }
