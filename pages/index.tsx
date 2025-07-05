@@ -1,3 +1,4 @@
-export default async function Page() {
-  return <div>Hello from Index!</div>;
+// pages/index.tsx
+export default function Home() {
+  return <h1>Hello from ZeroRSC 👋</h1>;
 }
