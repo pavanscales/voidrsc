@@ -1,3 +1,6 @@
+import React from "react";
+import { extractMetadata } from "./metadata-extractor"; // Your helper to get metadata from children
+
 export default function RootLayout({
   children,
   params,
@@ -5,16 +8,20 @@ export default function RootLayout({
   children: React.ReactNode;
   params: Record<string, string>;
 }) {
+  // Extract metadata elements like <title>, <meta>, <link> from children
+  const { meta, body } = extractMetadata(children);
+
   return (
-    <html>
+    <html lang="en">
       <head>
-        <title>UltraRouter App</title>
+        {/* Inject extracted metadata here */}
+        {meta}
       </head>
       <body>
         <header style={{ padding: 10, background: "#f0f0f0" }}>
-          <strong>🧭 Global Layout</strong>
+          <strong>🧭 UltraRouter Global Layout</strong>
         </header>
-        <main>{children}</main>
+        <main>{body}</main>
         <footer style={{ padding: 10, background: "#f0f0f0" }}>
           <small>© 2025 UltraRouter</small>
         </footer>
