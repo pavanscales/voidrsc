@@ -1,5 +1,5 @@
 import { router } from './router';
-import { renderRSC } from './render';
+import { renderRSC } from './renderRSC';
 import { cache } from './cache';
 
 const moduleCache = new Map<string, any>();

@@ -2,7 +2,7 @@ import { readdirSync, statSync } from "fs";
 import path, { sep } from "path";
 import { pathToFileURL } from "url";
 import { router } from "./router";
-import { renderRSC } from "./render";
+import { renderRSC } from "./renderRSC";
 import React from "react";
 
 const pagesDir = path.join(process.cwd(), "pages");

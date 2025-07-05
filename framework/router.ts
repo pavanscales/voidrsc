@@ -1,4 +1,4 @@
-import { renderRSC } from './render'; // ✅ Your render function
+import { renderRSC } from './renderRSC'; // ✅ Your render function
 
 type MiddlewareNext = () => Promise<void>;
 type Middleware = (
