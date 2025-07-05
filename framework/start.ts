@@ -9,18 +9,23 @@ import { Readable } from 'stream';
 import { router } from './router';
 import { preloadAll } from './preload';
 import { logMetrics } from './metrics';
-import { env } from './env'; // ✅ import env system
+import { env } from './env';
 import { serveStatic } from './serveStatic';
 import zlib from 'zlib';
 
-// ✅ Register env globally in the runtime
 if (!globalThis.__VOIDRSC__) globalThis.__VOIDRSC__ = {};
 globalThis.__VOIDRSC__.env = env;
 
 import './routes';
 
 const bootStart = Date.now();
-const port = env.PORT ?? 3000;
+const port = parseInt(env.PORT || '3000', 10);
+
+// ✅ Validate PORT
+if (isNaN(port) || port < 1 || port > 65535) {
+  throw new Error(`❌ Invalid PORT in env: "${env.PORT}". Must be between 1-65535`);
+}
+
 const isDev = process.env.NODE_ENV !== 'production';
 
 function logRequest(method: string, url: string, duration: number) {
@@ -58,7 +63,7 @@ async function handler(
           : (Readable.toWeb(req as any) as unknown as ReadableStream<Uint8Array>),
     });
 
-    // 📦 Static file check
+    // Serve static
     const staticResponse = await serveStatic(fetchRequest).catch((err) => {
       console.error('❌ serveStatic failed:', err);
     });
@@ -77,7 +82,7 @@ async function handler(
       return;
     }
 
-    // 🔀 Route resolution
+    // Dynamic route
     const response = await router.render(fetchRequest, url.pathname);
     console.log('📡 Routed:', response?.status ?? '404');
 
@@ -89,12 +94,10 @@ async function handler(
 
     res.statusCode = response.status ?? 200;
 
-    // Headers
     for (const [key, value] of response.headers.entries()) {
       res.setHeader(key, value);
     }
 
-    // Default headers
     if (!res.getHeader('Cache-Control')) {
       res.setHeader('Cache-Control', 'public, max-age=3600, stale-while-revalidate=60');
     }

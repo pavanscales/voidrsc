@@ -1,8 +1,18 @@
 // framework/navigation/router-context.tsx
 
 'use client';
-import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
+import React, {
+  createContext,
+  useContext,
+  useMemo,
+  useRef,
+  useEffect,
+  useCallback,
+} from 'react';
 
+/**
+ * RouterContext holds the current path, query, and navigation methods.
+ */
 type RouterContextType = {
   path: string;
   query: string;
@@ -16,47 +26,69 @@ type RouterContextType = {
 
 const RouterContext = createContext<RouterContextType | null>(null);
 
+/**
+ * RouterProvider tracks URL and provides high-performance client-side navigation.
+ */
 export function RouterProvider({ children }: { children: React.ReactNode }) {
-  const [path, setPath] = useState(window.location.pathname);
-  const [query, setQuery] = useState(window.location.search);
+  const pathRef = useRef(window.location.pathname);
+  const queryRef = useRef(window.location.search);
 
-  useEffect(() => {
-    const onPopState = () => {
-      setPath(window.location.pathname);
-      setQuery(window.location.search);
+  const subscribe = (callback: () => void) => {
+    const handler = () => {
+      const pathname = window.location.pathname;
+      const search = window.location.search;
+      if (pathname !== pathRef.current || search !== queryRef.current) {
+        pathRef.current = pathname;
+        queryRef.current = search;
+        callback();
+      }
     };
-    window.addEventListener('popstate', onPopState);
-    return () => window.removeEventListener('popstate', onPopState);
-  }, []);
+    window.addEventListener('popstate', handler);
+    return () => window.removeEventListener('popstate', handler);
+  };
+
+  const [version, setVersion] = React.useState(0);
+  useEffect(() => subscribe(() => setVersion((v) => v + 1)), []);
 
   const updateUrl = useCallback((to: string, replace = false) => {
     const url = new URL(to, window.location.origin);
-    if (replace) window.history.replaceState({}, '', to);
-    else window.history.pushState({}, '', to);
-    setPath(url.pathname);
-    setQuery(url.search);
+    if (replace) {
+      window.history.replaceState({}, '', url.toString());
+    } else {
+      window.history.pushState({}, '', url.toString());
+    }
+    pathRef.current = url.pathname;
+    queryRef.current = url.search;
     window.dispatchEvent(new PopStateEvent('popstate'));
   }, []);
 
-  // Simple prefetch cache to avoid duplicate fetches
-  const prefetched = React.useRef(new Set<string>());
+  const prefetched = useRef(new Map<string, number>());
   const prefetch = useCallback((to: string) => {
-    if (prefetched.current.has(to)) return;
-    prefetched.current.add(to);
-    // Customize prefetch logic as needed
-    fetch(to, { method: 'GET', headers: { 'X-Prefetch': '1' } }).catch(() => {});
+    const now = performance.now();
+    if (prefetched.current.has(to) && now - prefetched.current.get(to)! < 5000) return;
+    prefetched.current.set(to, now);
+    const task = () => fetch(to, { method: 'GET', headers: { 'X-Prefetch': '1' } }).catch(() => {});
+    if ('requestIdleCallback' in window) {
+      (window as any).requestIdleCallback(task);
+    } else {
+      setTimeout(task, 0);
+    }
   }, []);
 
-  const router: RouterContextType = {
-    path,
-    query,
+  const router: RouterContextType = useMemo(() => ({
+    get path() {
+      return pathRef.current;
+    },
+    get query() {
+      return queryRef.current;
+    },
     push: (to) => updateUrl(to, false),
     replace: (to) => updateUrl(to, true),
     prefetch,
     reload: () => window.location.reload(),
     back: () => window.history.back(),
     forward: () => window.history.forward(),
-  };
+  }), [updateUrl, prefetch]);
 
   return <RouterContext.Provider value={router}>{children}</RouterContext.Provider>;
 }
@@ -66,23 +98,24 @@ type LinkProps = React.AnchorHTMLAttributes<HTMLAnchorElement> & {
   prefetch?: boolean;
 };
 
+/**
+ * Link component for client-side navigation with optional prefetching.
+ */
 export function Link({ to, prefetch = true, onClick, ...props }: LinkProps) {
   const router = useRouter();
 
   const handleClick = (e: React.MouseEvent<HTMLAnchorElement>) => {
     if (
       e.defaultPrevented ||
+      e.button !== 0 ||
       e.metaKey ||
       e.altKey ||
       e.ctrlKey ||
-      e.shiftKey ||
-      e.button !== 0
-    )
-      return;
+      e.shiftKey
+    ) return;
 
     e.preventDefault();
     router.push(to);
-
     if (onClick) onClick(e);
   };
 
@@ -95,6 +128,9 @@ export function Link({ to, prefetch = true, onClick, ...props }: LinkProps) {
   return <a href={to} onClick={handleClick} {...props} />;
 }
 
+/**
+ * useRouter provides access to the router context.
+ */
 export function useRouter() {
   const ctx = useContext(RouterContext);
   if (!ctx) {

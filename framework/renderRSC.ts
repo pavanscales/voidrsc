@@ -4,8 +4,6 @@ import { renderToReadableStream } from './rsc';
 import { cache } from './cache';
 import { profiler } from './profiler';
 import { getPublicEnv } from './env';
-import { createBrotliCompress } from 'zlib';
-import { Writable } from 'stream/web';
 
 const encoder = new TextEncoder();
 const publicEnvString = JSON.stringify(getPublicEnv()).replace(/</g, '\u003c');
@@ -117,28 +115,11 @@ function htmlShell(stream: ReadableStream<Uint8Array>): Response {
 }
 
 function createCompressionStream(): TransformStream<Uint8Array, Uint8Array> {
-  try {
+  if (typeof CompressionStream !== 'undefined') {
     return new CompressionStream('br');
-  } catch {
-    const { readable, writable } = new TransformStream();
-    const compress = createBrotliCompress();
-    const writer = writable.getWriter();
-    const reader = readable.getReader();
-
-    (async () => {
-      const nodeStream = new Writable({
-        write(chunk) {
-          writer.write(chunk);
-        },
-        close() {
-          writer.close();
-        },
-      });
-      reader.pipeTo(nodeStream);
-    })();
-
-    return { readable, writable };
   }
+  // Fallback: no compression
+  return new TransformStream(); // identity passthrough
 }
 
 async function cacheStream(cacheKey: string, stream: ReadableStream<Uint8Array>) {
@@ -178,7 +159,7 @@ async function persist(cacheKey: string, chunks: Uint8Array[]) {
 
 async function loadLayouts() {
   if (!cachedLayouts) {
-    const layouts = (globalThis as any)._layouts as ((node: React.ReactNode) => React.ReactNode)[];
+    const layouts = (globalThis as any)._layouts as ((node: React.ReactNode) => React.ReactNode)[] | undefined;
     cachedLayouts = layouts ? [...layouts].reverse() : [];
   }
   return cachedLayouts!;
