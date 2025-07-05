@@ -9,9 +9,13 @@ import { Readable } from 'stream';
 import { router } from './router';
 import { preloadAll } from './preload';
 import { logMetrics } from './metrics';
-import { env } from './env';
+import { env } from './env'; // ✅ import env system
 import { serveStatic } from './serveStatic';
 import zlib from 'zlib';
+
+// ✅ Register env globally in the runtime
+if (!globalThis.__VOIDRSC__) globalThis.__VOIDRSC__ = {};
+globalThis.__VOIDRSC__.env = env;
 
 import './routes';
 
@@ -22,9 +26,7 @@ const isDev = process.env.NODE_ENV !== 'production';
 function logRequest(method: string, url: string, duration: number) {
   const mem = process.memoryUsage();
   console.log(
-    `⏱️ ${method} ${url} - ${duration}ms | Heap: ${(mem.heapUsed / 1024 / 1024).toFixed(
-      2
-    )} MB | RSS: ${(mem.rss / 1024 / 1024).toFixed(2)} MB`
+    `⏱️ ${method} ${url} - ${duration}ms | Heap: ${(mem.heapUsed / 1024 / 1024).toFixed(2)} MB | RSS: ${(mem.rss / 1024 / 1024).toFixed(2)} MB`
   );
 }
 
@@ -39,7 +41,7 @@ async function handler(
     const rawPath = 'url' in req ? req.url : req.headers[':path'];
     const host = 'headers' in req && 'host' in req.headers ? req.headers.host : req.headers[':authority'];
 
-    console.log('📥 Request:', { method, rawPath, host });
+    console.log('📥 Incoming:', { method, rawPath, host });
 
     if (!method || !rawPath || !host) {
       res.statusCode = 400;
@@ -56,36 +58,28 @@ async function handler(
           : (Readable.toWeb(req as any) as unknown as ReadableStream<Uint8Array>),
     });
 
-    // Serve static assets
-    try {
-      const staticResponse = await serveStatic(fetchRequest);
-      if (staticResponse) {
-        res.statusCode = staticResponse.status;
-        if (staticResponse.headers && typeof staticResponse.headers.entries === 'function') {
-          for (const [key, value] of staticResponse.headers.entries()) {
-            res.setHeader(key, value);
-          }
-        }
-        if (staticResponse.body) {
-          try {
-            const stream = Readable.fromWeb(staticResponse.body);
-            stream.pipe(res as any);
-          } catch (err) {
-            console.error('❌ Stream error (static):', err);
-            res.end();
-          }
-        } else {
-          res.end();
-        }
-        return;
-      }
-    } catch (err) {
+    // 📦 Static file check
+    const staticResponse = await serveStatic(fetchRequest).catch((err) => {
       console.error('❌ serveStatic failed:', err);
+    });
+
+    if (staticResponse) {
+      res.statusCode = staticResponse.status;
+      for (const [key, value] of staticResponse.headers.entries()) {
+        res.setHeader(key, value);
+      }
+      if (staticResponse.body) {
+        const stream = Readable.fromWeb(staticResponse.body);
+        stream.pipe(res as any);
+      } else {
+        res.end();
+      }
+      return;
     }
 
-    // Route matching
+    // 🔀 Route resolution
     const response = await router.render(fetchRequest, url.pathname);
-    console.log('📡 router.render returned:', response?.status ?? 'undefined');
+    console.log('📡 Routed:', response?.status ?? '404');
 
     if (!response) {
       res.statusCode = 404;
@@ -93,13 +87,11 @@ async function handler(
       return res.end('Not Found');
     }
 
-    res.statusCode = typeof response.status === 'number' ? response.status : 200;
+    res.statusCode = response.status ?? 200;
 
-    // ✅ Safe header handling
-    if (response.headers && typeof response.headers.entries === 'function') {
-      for (const [key, value] of response.headers.entries()) {
-        res.setHeader(key, value);
-      }
+    // Headers
+    for (const [key, value] of response.headers.entries()) {
+      res.setHeader(key, value);
     }
 
     // Default headers
@@ -111,23 +103,18 @@ async function handler(
     res.setHeader('X-XSS-Protection', '1; mode=block');
 
     if (response.body) {
-      try {
-        let stream = Readable.fromWeb(response.body);
-        if (response.headers?.get('Content-Type')?.includes('text')) {
-          res.setHeader('Content-Encoding', 'gzip');
-          stream = stream.pipe(zlib.createGzip());
-        }
-        stream.pipe(res as any);
-      } catch (err) {
-        console.error('❌ Failed to stream response:', err);
-        res.statusCode = 500;
-        return res.end('Stream error');
+      let stream = Readable.fromWeb(response.body);
+      const contentType = response.headers.get('Content-Type');
+      if (contentType?.includes('text')) {
+        res.setHeader('Content-Encoding', 'gzip');
+        stream = stream.pipe(zlib.createGzip());
       }
+      stream.pipe(res as any);
     } else {
       res.end();
     }
   } catch (err) {
-    console.error('❌ Top-level server error:', err);
+    console.error('❌ Server Error:', err);
     res.statusCode = 500;
     res.setHeader('Content-Type', 'text/plain');
     res.end('Internal Server Error');
@@ -153,35 +140,33 @@ async function runServer() {
       );
 
   server.listen(port, '0.0.0.0', () => {
-    console.log(`🚀 Worker ${process.pid} started on ${isDev ? 'http' : 'https'}://localhost:${port}`);
+    console.log(`🚀 Worker ${process.pid} running at ${isDev ? 'http' : 'https'}://localhost:${port}`);
   });
 
   server.on('error', (err) => {
-    console.error('❌ Server error:', err);
+    console.error('❌ Server failed:', err);
     process.exit(1);
   });
 
-  if (!isDev) {
-    logMetrics(bootStart);
-  } else {
-    console.log(`🚀 Cold start took: ${Date.now() - bootStart}ms`);
-  }
+  isDev
+    ? console.log(`⚡ Cold start: ${Date.now() - bootStart}ms`)
+    : logMetrics(bootStart);
 }
 
 if (cluster.isPrimary) {
   const numCPUs = os.cpus().length;
   const workerCount = isDev ? Math.min(4, numCPUs) : numCPUs;
 
-  console.log(`🧠 Master ${process.pid} running with ${workerCount} workers`);
+  console.log(`🧠 Master ${process.pid} launching ${workerCount} workers`);
   for (let i = 0; i < workerCount; i++) cluster.fork();
 
   cluster.on('exit', (worker) => {
-    console.log(`⚠️ Worker ${worker.process.pid} died. Restarting...`);
+    console.log(`⚠️ Worker ${worker.process.pid} crashed. Restarting...`);
     cluster.fork();
   });
 } else {
   runServer().catch((err) => {
-    console.error('❌ Fatal startup error:', err);
+    console.error('❌ Fatal error during boot:', err);
     process.exit(1);
   });
 }

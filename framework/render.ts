@@ -1,17 +1,23 @@
-
 import React from 'react';
 import { renderToReadableStream } from './rsc';
 import { cache } from './cache';
 import { profiler } from './profiler';
+import { getPublicEnv } from './env';
 
 const encoder = new TextEncoder();
-const shellStart = encoder.encode(
-  '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/>' +
-    '<meta name="viewport" content="width=device-width, initial-scale=1"/>' +
-    '<title>Fast RSC App</title><style>body{margin:0;font-family:system-ui,sans-serif}</style>' +
-    '</head><body><div id="root">'
-);
-const shellEnd = encoder.encode('</div></body></html>');
+const publicEnv = JSON.stringify(getPublicEnv()).replace(/</g, '\\u003c');
+
+const shellStart = encoder.encode(`<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Fast RSC App</title><script>window.__VOID_ENV__=${publicEnv}</script><style>body{margin:0;font-family:system-ui,sans-serif}</style></head><body><div id="root">`);
+
+const shellEnd = encoder.encode(`</div></body></html>`);
+
+const responseHeaders = {
+  'Content-Type': 'text/html; charset=utf-8',
+  'Cache-Control': 'public, max-age=3600, stale-while-revalidate=59',
+};
+
+// Cache reversed layouts array once per request lifecycle (if global layouts)
+let cachedLayouts: ((children: React.ReactNode) => React.ReactNode)[] | null = null;
 
 function htmlShell(stream: ReadableStream<Uint8Array>): Response {
   const fullStream = new ReadableStream({
@@ -22,24 +28,19 @@ function htmlShell(stream: ReadableStream<Uint8Array>): Response {
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
-          controller.enqueue(value);
+          if (value) controller.enqueue(value);
         }
-      } catch (err) {
-        controller.error(err);
+      } catch (error) {
+        controller.error(error);
       } finally {
         reader.releaseLock();
+        controller.enqueue(shellEnd);
+        controller.close();
       }
-      controller.enqueue(shellEnd);
-      controller.close();
     },
   });
 
-  return new Response(fullStream, {
-    headers: {
-      'Content-Type': 'text/html; charset=utf-8',
-      'Cache-Control': 'public, max-age=3600, stale-while-revalidate=59',
-    },
-  });
+  return new Response(fullStream, { headers: responseHeaders });
 }
 
 function htmlShellBuffer(buffer: Uint8Array): Response {
@@ -52,22 +53,16 @@ function htmlShellBuffer(buffer: Uint8Array): Response {
     },
   });
 
-  return new Response(fullStream, {
-    headers: {
-      'Content-Type': 'text/html; charset=utf-8',
-      'Cache-Control': 'public, max-age=3600, stale-while-revalidate=59',
-    },
-  });
+  return new Response(fullStream, { headers: responseHeaders });
 }
 
 async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   return Promise.race([
     promise,
-    new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error('Timeout exceeded')), ms)
-    ),
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Timeout exceeded')), ms)),
   ]);
 }
+
 export async function renderRSC({
   route,
   req,
@@ -76,75 +71,101 @@ export async function renderRSC({
   req: Request;
 }): Promise<Response> {
   profiler.start();
-
   try {
     const url = new URL(req.url);
-    const cacheKey = `${req.method}:${url.pathname}`;
+    const cacheKey = `${req.method}:${url.pathname}${url.search}`;
 
     const cachedBuffer = cache.get(cacheKey);
     if (cachedBuffer instanceof Uint8Array) {
       return htmlShellBuffer(cachedBuffer);
     }
 
-    let element = await withTimeout(route.handler(req), 3000);
+    let element = await withTimeout(route.handler(req), 2500);
 
-    const layouts = (globalThis as any)._layouts as
-      | ((children: React.ReactNode) => React.ReactNode)[]
-      | undefined;
+    if (!cachedLayouts) {
+      const layouts = (globalThis as any)._layouts as ((children: React.ReactNode) => React.ReactNode)[] | undefined;
+      cachedLayouts = layouts ? [...layouts].reverse() : [];
+    }
 
-    if (layouts?.length) {
-      for (const wrap of layouts.reverse()) {
-        element = wrap(element);
-      }
+    for (const wrap of cachedLayouts) {
+      element = wrap(element);
     }
 
     if (!element || typeof element !== 'object') {
-      throw new Error('Route handler returned invalid JSX element');
+      throw new Error('Route handler returned invalid JSX');
     }
 
-    const stream = await withTimeout(renderToReadableStream(element), 3000);
+    const stream = await withTimeout(renderToReadableStream(element), 1500);
 
-    // ALWAYS use tee() to avoid re-use of locked stream
-    const [body1, body2] = stream.tee();
-
-    // cache one copy
-    bufferStream(body2).then((buffer) => cache.set(cacheKey, buffer));
-
-    // serve the first
-    return htmlShell(body1);
-  } catch (err: any) {
-    return error500(err.message);
+    return await streamWithCacheIncremental(stream, cacheKey);
+  } catch (error: any) {
+    return error500(error.message);
   } finally {
     profiler.stop();
   }
 }
 
-async function bufferStream(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> {
+// Incremental caching by writing to cache in chunks (non-blocking)
+async function streamWithCacheIncremental(
+  stream: ReadableStream<Uint8Array>,
+  cacheKey: string
+): Promise<Response> {
   const reader = stream.getReader();
   const chunks: Uint8Array[] = [];
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (value) chunks.push(value);
+  const fullStream = new ReadableStream({
+    async start(controller) {
+      controller.enqueue(shellStart);
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value) {
+            chunks.push(value);
+            controller.enqueue(value);
+
+            // Write chunks incrementally every ~100kb or on stream end (optional)
+            if (chunks.length > 10) {
+              await saveChunksToCache(cacheKey, chunks);
+              chunks.length = 0; // Clear buffer
+            }
+          }
+        }
+      } catch (error) {
+        controller.error(error);
+      } finally {
+        reader.releaseLock();
+        controller.enqueue(shellEnd);
+        controller.close();
+
+        if (chunks.length > 0) {
+          await saveChunksToCache(cacheKey, chunks);
+        }
+      }
+    },
+  });
+
+  return new Response(fullStream, { headers: responseHeaders });
+}
+
+async function saveChunksToCache(cacheKey: string, chunks: Uint8Array[]) {
+  try {
+    const totalLength = chunks.reduce((a, c) => a + c.length, 0);
+    const buffer = new Uint8Array(totalLength);
+    let offset = 0;
+    for (const chunk of chunks) {
+      buffer.set(chunk, offset);
+      offset += chunk.length;
+    }
+    cache.set(cacheKey, buffer);
+  } catch (err) {
+    console.error('Cache set failed:', err);
   }
-
-  const totalLength = chunks.reduce((sum, c) => sum + c.length, 0);
-  const result = new Uint8Array(totalLength);
-
-  let offset = 0;
-  for (const chunk of chunks) {
-    result.set(chunk, offset);
-    offset += chunk.length;
-  }
-
-  return result;
 }
 
 function error500(msg: string): Response {
-  const html = `<!DOCTYPE html><html><body><h1>500 Error</h1><pre>${escapeHtml(
-    msg
-  )}</pre></body></html>`;
+  const html = `<!DOCTYPE html><html><body><h1>500 Error</h1><pre>${escapeHtml(msg)}</pre></body></html>`;
   return new Response(html, {
     status: 500,
     headers: { 'Content-Type': 'text/html; charset=utf-8' },
@@ -154,18 +175,12 @@ function error500(msg: string): Response {
 function escapeHtml(str: string): string {
   return str.replace(/[&<>"']/g, (char) => {
     switch (char) {
-      case '&':
-        return '&amp;';
-      case '<':
-        return '&lt;';
-      case '>':
-        return '&gt;';
-      case '"':
-        return '&quot;';
-      case "'":
-        return '&#39;';
-      default:
-        return char;
+      case '&': return '&amp;';
+      case '<': return '&lt;';
+      case '>': return '&gt;';
+      case '"': return '&quot;';
+      case "'": return '&#39;';
+      default: return char;
     }
   });
 }
