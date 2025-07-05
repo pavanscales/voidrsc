@@ -2,7 +2,7 @@ import { readdirSync, statSync } from "fs";
 import path, { sep } from "path";
 import { pathToFileURL } from "url";
 import { router } from "./router";
-import { renderRSC } from "./render"; // ✅ RSC renderer
+import { renderRSC } from "./render";
 import React from "react";
 
 const pagesDir = path.join(process.cwd(), "pages");
@@ -29,9 +29,7 @@ function toRoutePath(filePath: string): string {
     "/" +
     segments
       .map((seg) =>
-        seg.startsWith("[") && seg.endsWith("]")
-          ? `:${seg.slice(1, -1)}`
-          : seg
+        seg.startsWith("[") && seg.endsWith("]") ? `:${seg.slice(1, -1)}` : seg
       )
       .join("/")
   );
@@ -47,41 +45,55 @@ for (const filePath of walk(pagesDir)) {
 
   router.addRoute(
     routePath,
-    async (req, params) => {
-      try {
-        console.log(`⏳ Loading component for route: ${routePath}`);
-        const { default: Component } = await import(pathToFileURL(filePath).href);
-        console.log(`✅ Loaded component for route: ${routePath}`);
+    {
+      handler: async (req, params) => {
+        try {
+          console.log(`⏳ Loading component for route: ${routePath}`);
+          const mod = await import(pathToFileURL(filePath).href);
+          const Component = mod.default;
+          console.log(`✅ Loaded component for route: ${routePath}`);
 
-        const element = React.createElement(Component, { params });
+          const element = React.createElement(Component, { params });
 
-        // ⬇️ Inject layout wrappers
-        const match = router.match(routePath);
-        const layouts = [];
+          // Inject layout wrappers
+          const match = router.match(routePath);
+          const layouts: ((children: React.ReactNode) => React.ReactNode)[] = [];
 
-        if (match) {
-          for (const layoutNode of match.layouts) {
-            if (layoutNode.layoutHandler) {
-              const layoutComponent = await layoutNode.layoutHandler(req, params);
-              layouts.push((child: React.ReactNode) =>
-                React.createElement(layoutComponent as any, { children: child, params })
-              );
+          if (match) {
+            for (const layoutNode of match.layouts) {
+              if (layoutNode.layoutHandler) {
+                const layoutComponent = await layoutNode.layoutHandler(req, params);
+                layouts.push((child: React.ReactNode) =>
+                  React.createElement(layoutComponent as any, {
+                    children: child,
+                    params,
+                  })
+                );
+              }
             }
           }
+
+          (globalThis as any)._layouts = layouts;
+
+          return renderRSC({
+            route: {
+              handler: () => element,
+            },
+            req,
+          });
+        } catch (e) {
+          console.error(`❌ Error loading component for ${routePath}:`, e);
+          throw e;
         }
+      },
 
-        (globalThis as any)._layouts = layouts;
-
-        return renderRSC({
-          route: {
-            handler: () => element,
-          },
-          req,
-        });
-      } catch (e) {
-        console.error(`❌ Error loading component for ${routePath}:`, e);
-        throw e;
-      }
+      // ✅ Attach getServerData if exported from the page
+      getServerData: async (req, params) => {
+        const mod = await import(pathToFileURL(filePath).href);
+        return typeof mod.getServerData === "function"
+          ? mod.getServerData(req, params)
+          : undefined;
+      },
     },
     { isLayout, isGroup }
   );
