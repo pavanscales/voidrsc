@@ -15,11 +15,15 @@
     "noUnusedParameters": true,
     "allowSyntheticDefaultImports": true,
     "incremental": true,
-
-    // ✅ Node.js 18+ + RSC setup
     "outDir": "./dist",
     "rootDir": ".",
-    "noEmit": false
+    "noEmit": false,
+
+    // ✅ Add these 2 lines
+    "baseUrl": ".", // required for path aliasing
+    "paths": {
+      "@/*": ["./*"] // alias "@" to the project root
+    }
   },
   "include": [
     "framework/**/*",
