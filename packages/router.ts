@@ -1,13 +1,13 @@
-import { renderRSC } from './renderRSC'; // ✅ Your render function
+import { renderRSC } from './renderRSC';
 
-type MiddlewareNext = () => Promise<void>;
-type Middleware = (
+export type MiddlewareNext = () => Promise<void>;
+export type Middleware = (
   req: Request,
   params: Record<string, string>,
   next: MiddlewareNext
 ) => Promise<void> | void;
 
-type RouteHandler = {
+export type RouteHandler = {
   handler: (
     req: Request,
     params: Record<string, string>,
@@ -31,7 +31,7 @@ interface RouteNode {
 }
 
 class UltraRouter {
-  private root: RouteNode = this.createNode("");
+  private root: RouteNode = this.createNode('');
 
   private createNode(segment: string, isDynamic = false, paramName?: string): RouteNode {
     return {
@@ -49,11 +49,7 @@ class UltraRouter {
   addRoute(
     path: string,
     handler: RouteHandler,
-    options: {
-      isLayout?: boolean;
-      isGroup?: boolean;
-      middleware?: Middleware[];
-    } = {}
+    options: { isLayout?: boolean; isGroup?: boolean; middleware?: Middleware[] } = {}
   ) {
     const segments = this.parseSegments(path);
     let node = this.root;
@@ -63,9 +59,7 @@ class UltraRouter {
 
       if (seg.isCatchAll) {
         for (const c of node.children.values()) {
-          if (c.isCatchAll) {
-            throw new Error(`Only one catch-all route allowed per path segment: "${path}"`);
-          }
+          if (c.isCatchAll) throw new Error(`Only one catch-all allowed: "${path}"`);
         }
       }
 
@@ -79,13 +73,10 @@ class UltraRouter {
       node = child;
     }
 
-    if (options.isLayout && node.layoutHandler) {
-      throw new Error(`Duplicate layout handler defined for path: ${path}`);
-    }
-
-    if (!options.isLayout && node.routeHandler) {
-      throw new Error(`Duplicate route handler defined for path: ${path}`);
-    }
+    if (options.isLayout && node.layoutHandler)
+      throw new Error(`Duplicate layout handler: ${path}`);
+    if (!options.isLayout && node.routeHandler)
+      throw new Error(`Duplicate route handler: ${path}`);
 
     node.isGroup = !!options.isGroup;
     node.isLayout = !!options.isLayout;
@@ -96,39 +87,22 @@ class UltraRouter {
   }
 
   private parseSegments(path: string) {
-    return path
-      .split("/")
-      .filter(Boolean)
-      .map((seg) => {
-        if (seg.startsWith("(") && seg.endsWith(")")) {
-          return { segment: seg, isDynamic: false, isCatchAll: false };
-        }
-        if (seg.startsWith("*")) {
-          const name = seg.slice(1);
-          if (!name) throw new Error(`Catch-all must have param name: ${seg}`);
-          return { segment: seg, isDynamic: true, paramName: name, isCatchAll: true };
-        }
-        if (seg.startsWith(":")) {
-          const name = seg.slice(1);
-          if (!name) throw new Error(`Dynamic segment must have param name: ${seg}`);
-          return { segment: seg, isDynamic: true, paramName: name, isCatchAll: false };
-        }
-        return { segment: seg, isDynamic: false, isCatchAll: false };
-      });
+    return path.split('/').filter(Boolean).map((seg) => {
+      if (seg.startsWith('(') && seg.endsWith(')')) return { segment: seg, isDynamic: false, isCatchAll: false };
+      if (seg.startsWith('*')) return { segment: seg, isDynamic: true, isCatchAll: true, paramName: seg.slice(1) };
+      if (seg.startsWith(':')) return { segment: seg, isDynamic: true, isCatchAll: false, paramName: seg.slice(1) };
+      return { segment: seg, isDynamic: false, isCatchAll: false };
+    });
   }
 
-  private async runMiddleware(
-    req: Request,
-    params: Record<string, string>,
-    middleware: Middleware[]
-  ) {
+  private async runMiddleware(req: Request, params: Record<string, string>, middleware: Middleware[]) {
     let i = 0;
     const next: MiddlewareNext = async () => {
       if (i >= middleware.length) return;
       const fn = middleware[i++];
       let called = false;
       await fn(req, params, async () => {
-        if (called) throw new Error("`next()` called multiple times in middleware");
+        if (called) throw new Error('`next()` called multiple times');
         called = true;
         await next();
       });
@@ -137,7 +111,7 @@ class UltraRouter {
   }
 
   match(pathname: string) {
-    const segments = pathname.split("/").filter(Boolean);
+    const segments = pathname.split('/').filter(Boolean);
     const params: Record<string, string> = {};
     const match = this.matchNode(this.root, segments, 0, params);
     if (!match) return null;
@@ -184,7 +158,7 @@ class UltraRouter {
 
     for (const child of node.children.values()) {
       if (child.isCatchAll && child.paramName) {
-        params[child.paramName] = segments.slice(index).join("/");
+        params[child.paramName] = segments.slice(index).join('/');
         if (child.routeHandler) return { node: child, params };
         delete params[child.paramName];
       }
@@ -204,12 +178,10 @@ class UltraRouter {
 
       await this.runMiddleware(req, matched.params, matched.routeNode.middleware);
 
-      if (!matched.routeNode.routeHandler) {
-        throw new Error(`No route handler defined for path: ${pathname}`);
-      }
+      if (!matched.routeNode.routeHandler)
+        throw new Error(`No handler for path: ${pathname}`);
 
       const route = matched.routeNode.routeHandler;
-
       return await renderRSC({
         route: {
           handler: async (req) => {
@@ -222,8 +194,8 @@ class UltraRouter {
         req,
       });
     } catch (err: any) {
-      console.error(`Render error for ${pathname}:`, err);
-      return new Response("Internal Server Error", { status: 500 });
+      console.error(`Error rendering ${pathname}:`, err);
+      return new Response('Internal Server Error', { status: 500 });
     }
   }
 
@@ -231,8 +203,7 @@ class UltraRouter {
     const routes: { path: string }[] = [];
     const traverse = (node: RouteNode, parts: string[] = []) => {
       if (node.routeHandler) {
-        const path = "/" + parts.filter(Boolean).join("/");
-        routes.push({ path });
+        routes.push({ path: '/' + parts.filter(Boolean).join('/') });
       }
       for (const child of node.children.values()) {
         traverse(child, [...parts, child.segment]);

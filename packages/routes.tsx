@@ -5,7 +5,7 @@ import { router } from "./router";
 import { renderRSC } from "./renderRSC";
 import React from "react";
 
-const pagesDir = path.join(process.cwd(), "pages");
+const appDir = path.join(process.cwd(), "app");
 
 function walk(dir: string): string[] {
   const files = readdirSync(dir);
@@ -18,28 +18,19 @@ function walk(dir: string): string[] {
 }
 
 function toRoutePath(filePath: string): string {
-  const relPath = filePath.replace(pagesDir, "").replace(/\.tsx$/, "");
+  const relPath = filePath.replace(appDir, "").replace(/\/page\.tsx$/, "");
   const segments = relPath.split(sep).filter(Boolean);
-
-  if (segments.length === 1 && segments[0] === "index") {
-    return "/";
-  }
-
-  return (
-    "/" +
-    segments
-      .map((seg) =>
-        seg.startsWith("[") && seg.endsWith("]") ? `:${seg.slice(1, -1)}` : seg
-      )
-      .join("/")
-  );
+  return "/" + segments.join("/");
 }
 
-for (const filePath of walk(pagesDir)) {
-  const routePath = toRoutePath(filePath);
+for (const filePath of walk(appDir)) {
   const fileName = path.basename(filePath);
-  const isLayout = fileName === "_layout.tsx";
+  const isLayout = fileName === "layout.tsx";
+  const isPage = fileName === "page.tsx";
   const isGroup = filePath.includes(`${sep}(`);
+  const routePath = toRoutePath(filePath);
+
+  if (!isLayout && !isPage) continue;
 
   console.log(`✅ Registered route: ${routePath} → ${filePath}`);
 
@@ -51,43 +42,35 @@ for (const filePath of walk(pagesDir)) {
           console.log(`⏳ Loading component for route: ${routePath}`);
           const mod = await import(pathToFileURL(filePath).href);
           const Component = mod.default;
-          console.log(`✅ Loaded component for route: ${routePath}`);
 
-          const element = React.createElement(Component, { params });
+          const pageElement = React.createElement(Component, { params });
 
-          // Inject layout wrappers
+          // Compose layouts outer → inner
           const match = router.match(routePath);
-          const layouts: ((children: React.ReactNode) => React.ReactNode)[] = [];
+          let composed = pageElement;
 
           if (match) {
-            for (const layoutNode of match.layouts) {
+            for (const layoutNode of match.layouts.reverse()) {
               if (layoutNode.layoutHandler) {
-                const layoutComponent = await layoutNode.layoutHandler(req, params);
-                layouts.push((child: React.ReactNode) =>
-                  React.createElement(layoutComponent as any, {
-                    children: child,
-                    params,
-                  })
-                );
+                const LayoutComponent = await layoutNode.layoutHandler(req, params);
+                composed = React.createElement(LayoutComponent as any, {
+                  children: composed,
+                  params,
+                });
               }
             }
           }
 
-          (globalThis as any)._layouts = layouts;
-
           return renderRSC({
-            route: {
-              handler: () => element,
-            },
+            route: { handler: () => composed },
             req,
           });
-        } catch (e) {
-          console.error(`❌ Error loading component for ${routePath}:`, e);
-          throw e;
+        } catch (err) {
+          console.error(`❌ Failed to load ${routePath}:`, err);
+          return new Response("Internal Server Error", { status: 500 });
         }
       },
 
-      // ✅ Attach getServerData if exported from the page
       getServerData: async (req, params) => {
         const mod = await import(pathToFileURL(filePath).href);
         return typeof mod.getServerData === "function"
