@@ -88,9 +88,22 @@ class UltraRouter {
 
   private parseSegments(path: string) {
     return path.split('/').filter(Boolean).map((seg) => {
-      if (seg.startsWith('(') && seg.endsWith(')')) return { segment: seg, isDynamic: false, isCatchAll: false };
-      if (seg.startsWith('*')) return { segment: seg, isDynamic: true, isCatchAll: true, paramName: seg.slice(1) };
-      if (seg.startsWith(':')) return { segment: seg, isDynamic: true, isCatchAll: false, paramName: seg.slice(1) };
+      if (seg.startsWith('(') && seg.endsWith(')'))
+        return { segment: seg, isDynamic: false, isCatchAll: false };
+      if (seg.startsWith('*'))
+        return { segment: seg, isDynamic: true, isCatchAll: true, paramName: seg.slice(1) };
+      if (seg.startsWith(':'))
+        return { segment: seg, isDynamic: true, isCatchAll: false, paramName: seg.slice(1) };
+      if (seg.startsWith('[') && seg.endsWith(']')) {
+        const name = seg.slice(1, -1);
+        const isCatchAll = name.startsWith('...');
+        return {
+          segment: seg,
+          isDynamic: true,
+          isCatchAll,
+          paramName: isCatchAll ? name.slice(3) : name,
+        };
+      }
       return { segment: seg, isDynamic: false, isCatchAll: false };
     });
   }
@@ -111,10 +124,13 @@ class UltraRouter {
   }
 
   match(pathname: string) {
-    const segments = pathname.split('/').filter(Boolean);
+    const segments = pathname === '/' ? [] : pathname.split('/').filter(Boolean);
     const params: Record<string, string> = {};
     const match = this.matchNode(this.root, segments, 0, params);
-    if (!match) return null;
+    if (!match) {
+      console.warn(`⚠️ Route not matched for "${pathname}"`);
+      return null;
+    }
 
     const layouts: RouteNode[] = [];
     let node: RouteNode | undefined = match.node;
