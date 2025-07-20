@@ -20,7 +20,8 @@ class UltraLRUCache {
     private readonly ttl = 300_000
   ) {}
 
-  get(k: string, now = Date.now()): Uint8Array | undefined {
+  // Now caller must provide current timestamp `now`
+  get(k: string, now: number): Uint8Array | undefined {
     const e = this.map.get(k);
     if (!e) return this._miss();
 
@@ -34,7 +35,7 @@ class UltraLRUCache {
     return e.v;
   }
 
-  set(k: string, v: Uint8Array, now = Date.now()): void {
+  set(k: string, v: Uint8Array, now: number): void {
     let e = this.map.get(k);
 
     if (e) {
@@ -59,7 +60,7 @@ class UltraLRUCache {
   }
 
   private _moveToFront(e: Entry): void {
-    if (e === this.head) return; // tiny optimization to avoid work
+    if (e === this.head) return;
     this._unlink(e);
     this._insertFront(e);
   }
@@ -97,7 +98,7 @@ class UltraLRUCache {
   }
 }
 
-// Exported API
+// Usage requires you to pass Date.now() explicitly:
 export const cache = new UltraLRUCache(1000, 300_000);
-export const cacheResponse = (k: string, v: Uint8Array, now = Date.now()) => cache.set(k, v, now);
-export const getCachedResponse = (k: string, now = Date.now()) => cache.get(k, now);
+export const cacheResponse = (k: string, v: Uint8Array) => cache.set(k, v, Date.now());
+export const getCachedResponse = (k: string) => cache.get(k, Date.now());
