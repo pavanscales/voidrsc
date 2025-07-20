@@ -1,27 +1,24 @@
-// Simple deferred task queue to batch and run async tasks without blocking requests
+// Minimal deferred task queue for async batching without blocking
 
-const taskQueue: (() => Promise<void>)[] = [];
-let running = false;
+const queue: (() => Promise<void>)[] = [];
+let flushing = false;
 
-// Add a task to the queue, run async without blocking
 export function defer(task: () => Promise<void>) {
-  taskQueue.push(task);
-  runQueue();
+  queue.push(task);
+  if (!flushing) flush();
 }
 
-// Run queued tasks one by one (non-blocking)
-async function runQueue() {
-  if (running) return; // Already running
-  running = true;
+async function flush() {
+  flushing = true;
 
-  while (taskQueue.length) {
-    const task = taskQueue.shift()!;
+  for (let i = 0; i < queue.length; i++) {
     try {
-      await task();
-    } catch (e) {
-      console.error('Deferred task error:', e);
+      await queue[i]();
+    } catch (err) {
+      console.error('Deferred task error:', err);
     }
   }
 
-  running = false;
+  queue.length = 0; // Clear in-place without shift() GC churn
+  flushing = false;
 }
