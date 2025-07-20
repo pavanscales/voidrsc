@@ -4,23 +4,17 @@ function start() {
   startTime = Date.now();
 }
 
-function stop() {
+function stop(label = '⏱️ Profiler') {
   const duration = Date.now() - startTime;
-  const mem = process.memoryUsage();
-
-  const heapUsedMB = (mem.heapUsed / 1024 / 1024).toFixed(2);
-  const heapTotalMB = (mem.heapTotal / 1024 / 1024).toFixed(2);
-  const rssMB = (mem.rss / 1024 / 1024).toFixed(2);
-  const externalMB = (mem.external / 1024 / 1024).toFixed(2);
+  const { heapUsed, heapTotal, rss, external } = process.memoryUsage();
 
   console.log(
-    `⏱️ Profiler: ${duration}ms | Heap Used: ${heapUsedMB} MB / ${heapTotalMB} MB | RSS: ${rssMB} MB | External: ${externalMB} MB`
+    `${label}: ${duration}ms | Heap: ${(heapUsed / 1048576).toFixed(2)} / ${(heapTotal / 1048576).toFixed(2)} MB | RSS: ${(rss / 1048576).toFixed(2)} MB | External: ${(external / 1048576).toFixed(2)} MB`
   );
 }
 
-function trackColdStart(startTimestamp: number) {
-  const duration = Date.now() - startTimestamp;
-  console.log(`🚀 Cold Start Time: ${duration}ms`);
+function trackColdStart(bootTime: number, label = '🚀 Cold Start') {
+  console.log(`${label}: ${Date.now() - bootTime}ms`);
 }
 
 export const profiler = { start, stop, trackColdStart };
