@@ -1,112 +1,100 @@
-type CacheEntry = {
-  key: string;
-  value: Uint8Array;
-  timestamp: number;
-  prev?: CacheEntry;
-  next?: CacheEntry;
+type Entry = {
+  k: string;
+  v: Uint8Array;
+  t: number;
+  p?: Entry;
+  n?: Entry;
 };
 
-export class LRUCache {
-  private maxSize: number;
-  private ttl: number;
-  private cacheMap: Map<string, CacheEntry>;
-  private head?: CacheEntry;
-  private tail?: CacheEntry;
-  private currentSize: number;
+class LRUCache {
+  private map = new Map<string, Entry>();
+  private head?: Entry;
+  private tail?: Entry;
+  private count = 0;
 
-  public hits = 0;
-  public misses = 0;
-  private logEvictions = false;
+  private log = false;
 
-  constructor(maxSize = 1000, ttl = 5 * 60 * 1000) {
-    this.maxSize = maxSize;
-    this.ttl = ttl;
-    this.cacheMap = new Map();
-    this.currentSize = 0;
-  }
+  constructor(
+    private readonly maxSize = 1000,
+    private readonly ttl = 300_000
+  ) {}
 
-  get(key: string): Uint8Array | undefined {
-    const entry = this.cacheMap.get(key);
-    if (!entry) {
-      this.misses++;
-      return undefined;
-    }
+  hits = 0;
+  misses = 0;
 
-    if (Date.now() - entry.timestamp > this.ttl) {
-      this.evictEntry(entry);
-      this.misses++;
-      return undefined;
-    }
+  get(k: string): Uint8Array | undefined {
+    const e = this.map.get(k);
+    if (!e) return this._miss();
+
+    const age = Date.now() - e.t;
+    if (age > this.ttl) return this._expire(e);
 
     this.hits++;
-    this.moveToHead(entry);
-    return entry.value;
+    if (e !== this.head) this._moveToFront(e);
+    return e.v;
   }
 
-  async set(key: string, data: Uint8Array): Promise<void> {
-    let entry = this.cacheMap.get(key);
+  set(k: string, v: Uint8Array): void {
+    const now = Date.now();
+    let e = this.map.get(k);
 
-    if (entry) {
-      entry.value = data;
-      entry.timestamp = Date.now();
-      this.moveToHead(entry);
-      return;
-    }
-
-    entry = {
-      key,
-      value: data,
-      timestamp: Date.now(),
-    };
-
-    this.cacheMap.set(key, entry);
-    this.addToHead(entry);
-    this.currentSize++;
-
-    if (this.currentSize > this.maxSize) {
-      this.evictTail();
+    if (e) {
+      e.v = v;
+      e.t = now;
+      if (e !== this.head) this._moveToFront(e);
+    } else {
+      e = { k, v, t: now };
+      this.map.set(k, e);
+      this._insertAtFront(e);
+      if (++this.count > this.maxSize) this._evictTail();
     }
   }
 
-  private evictEntry(entry: CacheEntry) {
-    this.cacheMap.delete(entry.key);
-    this.removeEntry(entry);
-    this.currentSize--;
-    if (this.logEvictions) {
-      console.log(`🗑️ Cache evicted key: ${entry.key}`);
-    }
+  private _moveToFront(e: Entry) {
+    this._unlink(e);
+    this._insertAtFront(e);
   }
 
-  private evictTail() {
-    if (this.tail) {
-      this.evictEntry(this.tail);
-    }
+  private _insertAtFront(e: Entry) {
+    e.p = undefined;
+    e.n = this.head;
+    if (this.head) this.head.p = e;
+    this.head = e;
+    if (!this.tail) this.tail = e;
   }
 
-  private moveToHead(entry: CacheEntry) {
-    if (entry === this.head) return;
-    this.removeEntry(entry);
-    this.addToHead(entry);
+  private _unlink(e: Entry) {
+    const { p, n } = e;
+    if (p) p.n = n;
+    else this.head = n;
+    if (n) n.p = p;
+    else this.tail = p;
   }
 
-  private addToHead(entry: CacheEntry) {
-    entry.next = this.head;
-    entry.prev = undefined;
-    if (this.head) this.head.prev = entry;
-    this.head = entry;
-    if (!this.tail) this.tail = entry;
+  private _evictTail() {
+    if (this.tail) this._evict(this.tail);
   }
 
-  private removeEntry(entry: CacheEntry) {
-    if (entry.prev) entry.prev.next = entry.next;
-    else this.head = entry.next;
-
-    if (entry.next) entry.next.prev = entry.prev;
-    else this.tail = entry.prev;
+  private _evict(e: Entry) {
+    this.map.delete(e.k);
+    this._unlink(e);
+    this.count--;
+    if (this.log) console.log("🗑️ Evicted:", e.k);
   }
 
-  toggleEvictionLogging(enable: boolean) {
-    this.logEvictions = enable;
+  private _expire(e: Entry): undefined {
+    this._evict(e);
+    this.misses++;
+    return;
+  }
+
+  private _miss(): undefined {
+    this.misses++;
+    return;
+  }
+
+  toggleLogs(enable: boolean) {
+    this.log = enable;
   }
 
   resetMetrics() {
@@ -115,14 +103,7 @@ export class LRUCache {
   }
 }
 
-// ✅ Singleton cache instance
-export const cache = new LRUCache(1000, 5 * 60 * 1000);
-
-// ✅ Helper methods
-export async function cacheResponse(key: string, data: Uint8Array) {
-  await cache.set(key, data);
-}
-
-export function getCachedResponse(key: string): Uint8Array | undefined {
-  return cache.get(key);
-}
+// ⚡️ Public API
+export const cache = new LRUCache();
+export const cacheResponse = cache.set.bind(cache);
+export const getCachedResponse = cache.get.bind(cache);
