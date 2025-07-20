@@ -59,6 +59,7 @@ class UltraLRUCache {
   }
 
   private _moveToFront(e: Entry): void {
+    if (e === this.head) return; // tiny optimization to avoid work
     this._unlink(e);
     this._insertFront(e);
   }
@@ -96,7 +97,7 @@ class UltraLRUCache {
   }
 }
 
-// 🚀 Fastest possible exposed API
+// Exported API
 export const cache = new UltraLRUCache(1000, 300_000);
-export const cacheResponse = (k: string, v: Uint8Array) => cache.set(k, v);
-export const getCachedResponse = (k: string) => cache.get(k);
+export const cacheResponse = (k: string, v: Uint8Array, now = Date.now()) => cache.set(k, v, now);
+export const getCachedResponse = (k: string, now = Date.now()) => cache.get(k, now);
