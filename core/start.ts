@@ -1,32 +1,30 @@
-// optimized-start.ts
-import fs from 'fs';
-import path from 'path';
-import http from 'http';
-import http2 from 'http2';
-import cluster from 'cluster';
-import os from 'os';
-import { Readable } from 'stream';
-import { router } from './router';
-import { preloadAll } from './preload';
-import { logMetrics } from './metrics';
-import { env } from './env';
-import { serveStatic } from './serveStatic';
-import zlib from 'zlib';
+import fs from "fs";
+import path from "path";
+import http from "http";
+import http2 from "http2";
+import cluster from "cluster";
+import os from "os";
+import zlib from "zlib";
+import { Readable } from "stream";
+
+import { router } from "./router";
+import { preloadAll } from "./preload";
+import { logMetrics } from "./metrics";
+import { env } from "./env";
+import { serveStatic } from "./serveStatic";
+
+import "./routes";
 
 if (!globalThis.__VOIDRSC__) globalThis.__VOIDRSC__ = {};
 globalThis.__VOIDRSC__.env = env;
 
-import './routes';
-
 const bootStart = Date.now();
-const port = parseInt(env.PORT || '3000', 10);
+const port = Number(env.PORT ?? 3000);
+const isDev = process.env.NODE_ENV !== "production";
 
-// ✅ Validate PORT
-if (isNaN(port) || port < 1 || port > 65535) {
-  throw new Error(`❌ Invalid PORT in env: "${env.PORT}". Must be between 1-65535`);
+if (isNaN(port) || port <= 0 || port > 65535) {
+  throw new Error(`❌ Invalid PORT in env: "${env.PORT}". Must be between 1-65535.`);
 }
-
-const isDev = process.env.NODE_ENV !== 'production';
 
 function logRequest(method: string, url: string, duration: number) {
   const mem = process.memoryUsage();
@@ -39,43 +37,33 @@ async function handler(
   req: http.IncomingMessage | http2.Http2ServerRequest,
   res: http.ServerResponse | http2.Http2ServerResponse
 ) {
-  const reqStart = Date.now();
+  const start = Date.now();
 
   try {
-    const method = 'method' in req ? req.method : req.headers[':method'];
-    const rawPath = 'url' in req ? req.url : req.headers[':path'];
-    const host = 'headers' in req && 'host' in req.headers ? req.headers.host : req.headers[':authority'];
-
-    console.log('📥 Incoming:', { method, rawPath, host });
+    const method = "method" in req ? req.method : req.headers[":method"];
+    const rawPath = "url" in req ? req.url : req.headers[":path"];
+    const host = req.headers[":authority"] || req.headers["host"];
 
     if (!method || !rawPath || !host) {
-      res.statusCode = 400;
-      return res.end('Bad Request');
+      res.writeHead(400, { "Content-Type": "text/plain" }).end("Bad Request");
+      return;
     }
 
-    const url = new URL(rawPath!, `http://${host}`);
+    const url = new URL(rawPath as string, `http://${host}`);
     const fetchRequest = new Request(url.toString(), {
       method,
       headers: req.headers as HeadersInit,
-      body:
-        method === 'GET' || method === 'HEAD'
-          ? null
-          : (Readable.toWeb(req as any) as unknown as ReadableStream<Uint8Array>),
+      body: ["GET", "HEAD"].includes(method.toUpperCase())
+        ? null
+        : (Readable.toWeb?.(req as any) ?? req) as any,
     });
 
-    // Serve static
-    const staticResponse = await serveStatic(fetchRequest).catch((err) => {
-      console.error('❌ serveStatic failed:', err);
-    });
-
-    if (staticResponse) {
-      res.statusCode = staticResponse.status;
-      for (const [key, value] of staticResponse.headers.entries()) {
-        res.setHeader(key, value);
-      }
-      if (staticResponse.body) {
-        const stream = Readable.fromWeb(staticResponse.body);
-        stream.pipe(res as any);
+    // Static route
+    const staticRes = await serveStatic(fetchRequest).catch(console.error);
+    if (staticRes) {
+      res.writeHead(staticRes.status, Object.fromEntries(staticRes.headers.entries()));
+      if (staticRes.body) {
+        Readable.fromWeb(staticRes.body).pipe(res as any);
       } else {
         res.end();
       }
@@ -83,49 +71,36 @@ async function handler(
     }
 
     // Dynamic route
-    const response = await router.render(fetchRequest, url.pathname);
-    console.log('📡 Routed:', response?.status ?? '404');
-
-    if (!response) {
-      res.statusCode = 404;
-      res.setHeader('Content-Type', 'text/plain');
-      return res.end('Not Found');
+    const dynRes = await router.render(fetchRequest, url.pathname);
+    if (!dynRes) {
+      res.writeHead(404, { "Content-Type": "text/plain" }).end("Not Found");
+      return;
     }
 
-    res.statusCode = response.status ?? 200;
+    const headers: Record<string, string> = Object.fromEntries(dynRes.headers.entries());
+    headers["Cache-Control"] ??= "public, max-age=3600, stale-while-revalidate=60";
+    headers["X-Content-Type-Options"] = "nosniff";
+    headers["X-Frame-Options"] = "DENY";
+    headers["X-XSS-Protection"] = "1; mode=block";
 
-    for (const [key, value] of response.headers.entries()) {
-      res.setHeader(key, value);
+    const acceptsGzip = req.headers["accept-encoding"]?.includes("gzip");
+    let body = dynRes.body ? Readable.fromWeb(dynRes.body) : null;
+
+    if (body && headers["Content-Type"]?.includes("text") && acceptsGzip) {
+      headers["Content-Encoding"] = "gzip";
+      body = body.pipe(zlib.createGzip());
     }
 
-    if (!res.getHeader('Cache-Control')) {
-      res.setHeader('Cache-Control', 'public, max-age=3600, stale-while-revalidate=60');
-    }
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('X-Frame-Options', 'DENY');
-    res.setHeader('X-XSS-Protection', '1; mode=block');
-
-    if (response.body) {
-      let stream = Readable.fromWeb(response.body);
-      const contentType = response.headers.get('Content-Type');
-      if (contentType?.includes('text')) {
-        res.setHeader('Content-Encoding', 'gzip');
-        stream = stream.pipe(zlib.createGzip());
-      }
-      stream.pipe(res as any);
-    } else {
-      res.end();
-    }
+    res.writeHead(dynRes.status ?? 200, headers);
+    body ? body.pipe(res as any) : res.end();
   } catch (err) {
-    console.error('❌ Server Error:', err);
-    res.statusCode = 500;
-    res.setHeader('Content-Type', 'text/plain');
-    res.end('Internal Server Error');
+    console.error("❌ Server Error:", err);
+    res.writeHead(500, { "Content-Type": "text/plain" }).end("Internal Server Error");
   } finally {
-    const duration = Date.now() - reqStart;
-    const method = 'method' in req ? req.method : req.headers[':method'];
-    const path = 'url' in req ? req.url : req.headers[':path'];
-    logRequest(method ?? 'UNKNOWN', path ?? 'UNKNOWN', duration);
+    const duration = Date.now() - start;
+    const method = "method" in req ? req.method : req.headers[":method"];
+    const path = "url" in req ? req.url : req.headers[":path"];
+    logRequest(method ?? "UNKNOWN", path ?? "UNKNOWN", duration);
   }
 }
 
@@ -136,40 +111,41 @@ async function runServer() {
     ? http.createServer(handler)
     : http2.createSecureServer(
         {
-          key: fs.readFileSync(path.join(process.cwd(), 'certs/key.pem')),
-          cert: fs.readFileSync(path.join(process.cwd(), 'certs/cert.pem')),
+          key: fs.readFileSync(path.join(process.cwd(), "certs/key.pem")),
+          cert: fs.readFileSync(path.join(process.cwd(), "certs/cert.pem")),
         },
         handler
       );
 
-  server.listen(port, '0.0.0.0', () => {
-    console.log(`🚀 Worker ${process.pid} running at ${isDev ? 'http' : 'https'}://localhost:${port}`);
+  server.listen(port, "0.0.0.0", () => {
+    console.log(`🚀 Worker ${process.pid} ready at ${isDev ? "http" : "https"}://localhost:${port}`);
+    if (isDev) {
+      console.log(`⚡ Cold start: ${Date.now() - bootStart}ms`);
+    } else {
+      logMetrics(bootStart);
+    }
   });
 
-  server.on('error', (err) => {
-    console.error('❌ Server failed:', err);
+  server.on("error", (err) => {
+    console.error("❌ Server error:", err);
     process.exit(1);
   });
-
-  isDev
-    ? console.log(`⚡ Cold start: ${Date.now() - bootStart}ms`)
-    : logMetrics(bootStart);
 }
 
 if (cluster.isPrimary) {
-  const numCPUs = os.cpus().length;
-  const workerCount = isDev ? Math.min(4, numCPUs) : numCPUs;
+  const cpus = os.cpus().length;
+  const workers = isDev ? Math.min(4, cpus) : cpus;
 
-  console.log(`🧠 Master ${process.pid} launching ${workerCount} workers`);
-  for (let i = 0; i < workerCount; i++) cluster.fork();
+  console.log(`🧠 Master ${process.pid} starting ${workers} workers`);
+  for (let i = 0; i < workers; i++) cluster.fork();
 
-  cluster.on('exit', (worker) => {
-    console.log(`⚠️ Worker ${worker.process.pid} crashed. Restarting...`);
+  cluster.on("exit", (worker) => {
+    console.log(`⚠️ Worker ${worker.process.pid} exited. Restarting...`);
     cluster.fork();
   });
 } else {
   runServer().catch((err) => {
-    console.error('❌ Fatal error during boot:', err);
+    console.error("❌ Fatal server boot failure:", err);
     process.exit(1);
   });
 }
