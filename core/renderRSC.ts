@@ -5,7 +5,7 @@ import { profiler } from './profiler';
 import { getPublicEnv } from './env';
 
 const encoder = new TextEncoder();
-const publicEnvString = JSON.stringify(getPublicEnv()).replace(/</g, '\u003c');
+const publicEnvString = JSON.stringify(getPublicEnv()).replace(/</g, '\\u003c');
 
 const earlyHead = encoder.encode(
   `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -13,6 +13,7 @@ const earlyHead = encoder.encode(
 <link rel="preload" href="/main.css" as="style" />
 <style>body{margin:0;font-family:system-ui,sans-serif}</style></head><body><div id="root">`
 );
+
 const shellEnd = encoder.encode(`</div></body></html>`);
 
 const responseHeaders: HeadersInit = {
@@ -45,12 +46,12 @@ export async function renderRSC({
 
   try {
     const url = new URL(req.url);
-    const cacheKey = `RSC:${req.method}:${url.pathname}?${url.searchParams.toString()}`;
+    const cacheKey = `RSC:${req.method}:${url.pathname}?${url.searchParams}`;
 
     const cached = cache.get(cacheKey);
     if (cached instanceof Uint8Array) {
       logPerf('CACHE_HIT', startTime);
-      return htmlShellBuffer(cached);
+      return renderShellFromBuffer(cached);
     }
 
     const [serverData, layouts] = await Promise.all([
@@ -60,6 +61,7 @@ export async function renderRSC({
 
     let jsx = await timeout(route.handler(req, serverData), 1200);
     const routeId = Symbol.for(url.pathname);
+
     if (layoutMemo.has(routeId)) {
       jsx = layoutMemo.get(routeId)!;
     } else {
@@ -67,45 +69,40 @@ export async function renderRSC({
       layoutMemo.set(routeId, jsx);
     }
 
-    const streamPromise = renderToReadableStream(Promise.resolve().then(() => jsx));
-    const [client, server] = (await streamPromise).tee();
-    cacheStream(cacheKey, server);
+    const stream = await renderToReadableStream(Promise.resolve().then(() => jsx));
+    const [clientStream, serverStream] = stream.tee();
+
+    void cacheStream(cacheKey, serverStream);
     logPerf('CACHE_MISS', startTime);
-    return htmlShell(client);
+    return renderShell(clientStream);
   } catch (err: any) {
-    return error500(err.message || 'Internal Server Error');
+    console.error('❌ RSC render error:', err);
+    return renderError500(err.message || 'Internal Server Error');
   } finally {
     profiler.stop();
   }
 }
 
-function htmlShellBuffer(buffer: Uint8Array): Response {
-  const { readable, writable } = new TransformStream();
-  const writer = writable.getWriter();
-  writer.write(earlyHead);
-  writer.write(buffer);
-  writer.write(shellEnd);
-  writer.close();
-  return new Response(readable.pipeThrough(createCompressionStream()), {
-    headers: responseHeaders,
-  });
-}
-
-function htmlShell(stream: ReadableStream<Uint8Array>): Response {
+function renderShell(stream: ReadableStream<Uint8Array>): Response {
   const { readable, writable } = new TransformStream();
   const writer = writable.getWriter();
   const reader = stream.getReader();
 
   (async () => {
-    writer.write(earlyHead);
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      writer.write(value);
+    try {
+      writer.write(earlyHead);
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) writer.write(value);
+      }
+      writer.write(shellEnd);
+    } catch (err) {
+      console.error('❌ Stream write error:', err);
+    } finally {
+      writer.close();
+      reader.releaseLock();
     }
-    writer.write(shellEnd);
-    writer.close();
-    reader.releaseLock();
   })();
 
   return new Response(readable.pipeThrough(createCompressionStream()), {
@@ -113,66 +110,72 @@ function htmlShell(stream: ReadableStream<Uint8Array>): Response {
   });
 }
 
-// --- Safe compression stream fix ---
+function renderShellFromBuffer(buffer: Uint8Array): Response {
+  const { readable, writable } = new TransformStream();
+  const writer = writable.getWriter();
+
+  writer.write(earlyHead);
+  writer.write(buffer);
+  writer.write(shellEnd);
+  writer.close();
+
+  return new Response(readable.pipeThrough(createCompressionStream()), {
+    headers: responseHeaders,
+  });
+}
+
 function createCompressionStream(): TransformStream<Uint8Array, Uint8Array> {
   if (typeof CompressionStream !== 'undefined') {
     try {
       return new CompressionStream('br');
     } catch {
-      // 'br' unsupported - fallback to pass-through
       return new TransformStream();
     }
   }
-  // No CompressionStream API - fallback to pass-through
   return new TransformStream();
 }
-// -----------------------------------
 
 async function cacheStream(cacheKey: string, stream: ReadableStream<Uint8Array>) {
   const reader = stream.getReader();
-  const chunks = new Array<Uint8Array>(128);
+  const chunks: Uint8Array[] = [];
   let total = 0;
-  let index = 0;
 
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
     if (value) {
-      chunks[index++] = value;
+      chunks.push(value);
       total += value.length;
-      if (total > 128 * 1024 || index >= 128) {
-        await persist(cacheKey, chunks.slice(0, index));
-        index = 0;
-        total = 0;
-      }
+      if (total > 128 * 1024) break;
     }
   }
 
-  if (index) await persist(cacheKey, chunks.slice(0, index));
+  const buffer = mergeChunks(chunks);
+  cache.set(cacheKey, buffer);
   reader.releaseLock();
 }
 
-async function persist(cacheKey: string, chunks: Uint8Array[]) {
-  const size = chunks.reduce((sum, c) => sum + c.length, 0);
-  const buffer = new Uint8Array(size);
+function mergeChunks(chunks: Uint8Array[]): Uint8Array {
+  const totalLength = chunks.reduce((acc, chunk) => acc + chunk.length, 0);
+  const result = new Uint8Array(totalLength);
   let offset = 0;
   for (const chunk of chunks) {
-    buffer.set(chunk, offset);
+    result.set(chunk, offset);
     offset += chunk.length;
   }
-  cache.set(cacheKey, buffer);
+  return result;
 }
 
 async function loadLayouts() {
   if (!cachedLayouts) {
-    const layouts = (globalThis as any)._layouts as ((node: React.ReactNode) => React.ReactNode)[] | undefined;
+    const layouts = (globalThis as any)._layouts as ((n: React.ReactNode) => React.ReactNode)[] | undefined;
     cachedLayouts = layouts ? [...layouts].reverse() : [];
   }
   return cachedLayouts!;
 }
 
-function error500(msg: string): Response {
-  const html = `<!DOCTYPE html><html><body><h1>500 Error</h1><pre>${escapeHtml(msg)}</pre></body></html>`;
+function renderError500(message: string): Response {
+  const html = `<!DOCTYPE html><html><body><h1>500 Error</h1><pre>${escapeHtml(message)}</pre></body></html>`;
   return new Response(html, {
     status: 500,
     headers: { 'Content-Type': 'text/html; charset=utf-8' },
@@ -180,12 +183,18 @@ function error500(msg: string): Response {
 }
 
 function escapeHtml(str: string): string {
-  return str.replace(/[&<>"']/g, (c) => (
-    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] ?? c
-  ));
+  return str.replace(/[&<>"']/g, (char) =>
+    ({
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;',
+    }[char] || char)
+  );
 }
 
 function logPerf(stage: string, start: number) {
   const duration = performance.now() - start;
-  console.log(`[PERF][${stage}] took ${duration.toFixed(1)}ms`);
+  console.log(`[PERF][${stage}] ${duration.toFixed(1)}ms`);
 }
