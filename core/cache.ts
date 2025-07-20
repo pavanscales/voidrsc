@@ -6,12 +6,11 @@ type Entry = {
   n?: Entry;
 };
 
-class FastLRUCache {
+class UltraLRUCache {
   private map = new Map<string, Entry>();
   private head?: Entry;
   private tail?: Entry;
   private count = 0;
-  private log = false;
 
   hits = 0;
   misses = 0;
@@ -25,7 +24,10 @@ class FastLRUCache {
     const e = this.map.get(k);
     if (!e) return this._miss();
 
-    if (now - e.t > this.ttl) return this._expire(e);
+    if (now - e.t > this.ttl) {
+      this._remove(e);
+      return this._miss();
+    }
 
     this.hits++;
     if (e !== this.head) this._moveToFront(e);
@@ -42,71 +44,59 @@ class FastLRUCache {
     } else {
       e = { k, v, t: now };
       this.map.set(k, e);
-      this._insertAtFront(e);
-      if (++this.count > this.maxSize) this._evictTail();
+      this._insertFront(e);
+      this.count++;
+
+      if (this.count > this.maxSize && this.tail) {
+        this._remove(this.tail);
+      }
     }
-  }
-
-  private _moveToFront(e: Entry) {
-    // No null checks — trust internal correctness
-    const { p, n } = e;
-    if (p) p.n = n;
-    else this.head = n;
-    if (n) n.p = p;
-    else this.tail = p;
-
-    e.p = undefined;
-    e.n = this.head;
-    if (this.head) this.head.p = e;
-    this.head = e;
-    if (!this.tail) this.tail = e;
-  }
-
-  private _insertAtFront(e: Entry) {
-    e.p = undefined;
-    e.n = this.head;
-    if (this.head) this.head.p = e;
-    this.head = e;
-    if (!this.tail) this.tail = e;
-  }
-
-  private _evictTail() {
-    if (this.tail) this._evict(this.tail);
-  }
-
-  private _evict(e: Entry) {
-    this.map.delete(e.k);
-    const { p, n } = e;
-    if (p) p.n = n;
-    else this.head = n;
-    if (n) n.p = p;
-    else this.tail = p;
-    this.count--;
-    if (this.log) console.log("🗑️ Evicted:", e.k);
-  }
-
-  private _expire(e: Entry): undefined {
-    this._evict(e);
-    this.misses++;
-    return;
   }
 
   private _miss(): undefined {
     this.misses++;
-    return;
+    return undefined;
   }
 
-  toggleLogs(enable: boolean) {
-    this.log = enable;
+  private _moveToFront(e: Entry): void {
+    this._unlink(e);
+    this._insertFront(e);
   }
 
-  resetMetrics() {
-    this.hits = 0;
-    this.misses = 0;
+  private _insertFront(e: Entry): void {
+    e.n = this.head;
+    e.p = undefined;
+    if (this.head) this.head.p = e;
+    this.head = e;
+    if (!this.tail) this.tail = e;
+  }
+
+  private _unlink(e: Entry): void {
+    if (e.p) e.p.n = e.n;
+    else this.head = e.n;
+
+    if (e.n) e.n.p = e.p;
+    else this.tail = e.p;
+  }
+
+  private _remove(e: Entry): void {
+    this.map.delete(e.k);
+    this._unlink(e);
+    this.count--;
+  }
+
+  reset() {
+    this.map.clear();
+    this.head = this.tail = undefined;
+    this.count = this.hits = this.misses = 0;
+  }
+
+  logStats() {
+    console.log("Hits:", this.hits, "Misses:", this.misses);
   }
 }
 
-// Public API
-export const cache = new FastLRUCache();
-export const cacheResponse = cache.set.bind(cache);
-export const getCachedResponse = cache.get.bind(cache);
+// 🚀 Fastest possible exposed API
+export const cache = new UltraLRUCache(1000, 300_000);
+export const cacheResponse = (k: string, v: Uint8Array) => cache.set(k, v);
+export const getCachedResponse = (k: string) => cache.get(k);
