@@ -20,13 +20,10 @@ const shellEnd = encoder.encode(`</div></body></html>`);
 const responseHeaders: HeadersInit = {
   'Content-Type': 'text/html; charset=utf-8',
   'Cache-Control': 'public, max-age=3600, stale-while-revalidate=59',
-  // Real HTTP/2 push depends on server support, keep but configure server
   'Link': '</main.css>; rel=preload; as=style',
 };
 
 let cachedLayouts: ((children: React.ReactNode) => React.ReactNode)[] | null = null;
-// CHANGE: store only cached serialized buffers, not JSX trees
-const layoutCache = new Map<string, Uint8Array>();
 
 function timeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   return Promise.race([
@@ -35,10 +32,7 @@ function timeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   ]);
 }
 
-export async function renderRSC({
-  route,
-  req,
-}: {
+export async function renderRSC({ route, req }: {
   route: {
     handler: (req: Request, data?: any) => Promise<React.ReactNode>;
     getServerData?: (req: Request) => Promise<any>;
@@ -52,38 +46,30 @@ export async function renderRSC({
     const url = new URL(req.url);
     const cacheKey = `RSC:${req.method}:${url.pathname}?${url.searchParams}`;
 
-    // Early hit: cached full HTML buffer (serialized)
-    const cachedBuffer = cache.get(cacheKey);
-    if (cachedBuffer instanceof Uint8Array) {
+    const cached = cache.get(cacheKey);
+    if (cached instanceof Uint8Array) {
       profiler.mark('rsc-cache-hit');
       logPerf('CACHE_HIT', 'rsc-start');
-      return renderShellFromBuffer(cachedBuffer);
+      return renderShellFromBuffer(cached);
     }
 
-    // Parallel fetch server data + layouts
-    const serverDataPromise = route.getServerData
-      ? timeout(route.getServerData(req), 500).catch(() => undefined)
-      : Promise.resolve(undefined);
+    const [serverData, layouts] = await Promise.all([
+      route.getServerData ? timeout(route.getServerData(req), 400).catch(() => undefined) : undefined,
+      loadLayouts()
+    ]);
 
-    const layoutsPromise = loadLayouts();
-
-    const [serverData, layouts] = await Promise.all([serverDataPromise, layoutsPromise]);
-
-    // Compose React tree wrapped in layouts *without* caching JSX
-    let jsx = await timeout(route.handler(req, serverData), 1000);
+    let jsx = await timeout(route.handler(req, serverData), 800);
     for (const wrap of layouts) jsx = wrap(jsx);
 
-    // Render stream ASAP (no Promise.resolve wrapper, just directly)
     const stream = await renderToReadableStream(jsx);
     const [clientStream, serverStream] = stream.tee();
 
-    // Cache serialized chunks as buffer for fast reuse
     void cacheStream(cacheKey, serverStream);
 
     profiler.mark('rsc-render-done');
     logPerf('CACHE_MISS', 'rsc-start');
-
     return renderShell(clientStream);
+
   } catch (err: any) {
     console.error('❌ RSC render error:', err);
     return renderError500(err.message || 'Internal Server Error');
@@ -97,11 +83,10 @@ export async function handleMutation(req: Request): Promise<Response> {
     const input = await req.json();
     const ctx = {
       headers: req.headers,
-      cookies: {}, // extract if available
+      cookies: {}, // Optional: add cookie parser
     };
 
     const result = await mutateData(input, ctx);
-
     if (result.status === 'error') {
       return new Response(JSON.stringify({ error: result.error }), {
         status: 400,
@@ -109,11 +94,9 @@ export async function handleMutation(req: Request): Promise<Response> {
       });
     }
 
-    // FORCE: Invalidate cache for affected routes ASAP (important for freshness)
-    // Assuming result.route is the pathname string, adjust as needed
     if (result.route) {
       cache.delete(`RSC:GET:${result.route}`);
-      console.log(`[CACHE] Invalidated cache for route: ${result.route}`);
+      console.log(`[CACHE] Invalidated route: ${result.route}`);
     }
 
     return new Response(JSON.stringify({ status: 'success', result: result.result }), {
@@ -130,9 +113,12 @@ export async function handleMutation(req: Request): Promise<Response> {
 }
 
 export async function handler(req: Request, route: any): Promise<Response> {
-  if (req.method === 'GET') return renderRSC({ route, req });
-  if (req.method === 'POST' || req.method === 'PATCH') return handleMutation(req);
-  return new Response('Method Not Allowed', { status: 405 });
+  switch (req.method) {
+    case 'GET': return renderRSC({ route, req });
+    case 'POST':
+    case 'PATCH': return handleMutation(req);
+    default: return new Response('Method Not Allowed', { status: 405 });
+  }
 }
 
 function renderShell(stream: ReadableStream<Uint8Array>): Response {
@@ -143,16 +129,14 @@ function renderShell(stream: ReadableStream<Uint8Array>): Response {
   (async () => {
     try {
       writer.write(earlyHead);
-
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
         if (value) writer.write(value);
       }
-
       writer.write(shellEnd);
     } catch (err) {
-      console.error('❌ Stream write error:', err);
+      console.error('❌ Stream error:', err);
     } finally {
       try { writer.close(); } catch {}
       try { reader.releaseLock(); } catch {}
@@ -179,49 +163,50 @@ function renderShellFromBuffer(buffer: Uint8Array): Response {
 }
 
 function createCompressionStream(): TransformStream<Uint8Array, Uint8Array> {
-  if (typeof CompressionStream !== 'undefined') {
-    try {
-      return new CompressionStream('br');
-    } catch {
-      return new TransformStream();
-    }
+  try {
+    return typeof CompressionStream !== 'undefined'
+      ? new CompressionStream('br')
+      : new TransformStream();
+  } catch {
+    return new TransformStream();
   }
-  return new TransformStream();
 }
 
-async function cacheStream(cacheKey: string, stream: ReadableStream<Uint8Array>) {
+async function cacheStream(key: string, stream: ReadableStream<Uint8Array>) {
   const reader = stream.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (value) {
-      chunks.push(value);
-      total += value.length;
-
-      if (total > 128 * 1024) break;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        chunks.push(value);
+        total += value.length;
+        if (total > 128 * 1024) break; // 128 KB limit
+      }
     }
+
+    const buffer = mergeChunks(chunks);
+    cache.set(key, buffer);
+    console.log(`[CACHE] Stored ${total} bytes under key ${key}`);
+  } catch (err) {
+    console.warn('⚠️ Cache stream failed:', err);
+  } finally {
+    try { reader.releaseLock(); } catch {}
   }
-
-  const buffer = mergeChunks(chunks);
-  cache.set(cacheKey, buffer);
-
-  try { reader.releaseLock(); } catch {}
-
-  console.log(`[CACHE] Stored ${total} bytes for key ${cacheKey}`);
 }
 
 function mergeChunks(chunks: Uint8Array[]): Uint8Array {
-  const totalLength = chunks.reduce((acc, c) => acc + c.length, 0);
-  const result = new Uint8Array(totalLength);
+  const totalLength = chunks.reduce((sum, c) => sum + c.length, 0);
+  const merged = new Uint8Array(totalLength);
   let offset = 0;
   for (const chunk of chunks) {
-    result.set(chunk, offset);
+    merged.set(chunk, offset);
     offset += chunk.length;
   }
-  return result;
+  return merged;
 }
 
 async function loadLayouts() {
@@ -233,7 +218,7 @@ async function loadLayouts() {
 }
 
 function renderError500(message: string): Response {
-  const html = `<!DOCTYPE html><html><body><h1>500 Error</h1><pre>${escapeHtml(message)}</pre></body></html>`;
+  const html = `<!DOCTYPE html><html><body><h1>500 - Server Error</h1><pre>${escapeHtml(message)}</pre></body></html>`;
   return new Response(html, {
     status: 500,
     headers: { 'Content-Type': 'text/html; charset=utf-8' },
