@@ -1,0 +1,8 @@
+certs/                  # If used for dev TLS
+core/                   # Actual app logic / code
+public/                 # Static assets (images, fonts, etc.)
+README.md               # Project documentation
+bunfig.toml             # If you're using Bun
+package.json            # Project manifest
+tsconfig.json           # TypeScript config
+pnpm-workspace.yaml     # Only if you're using pnpm workspaces (not Bun)
