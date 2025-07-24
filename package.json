@@ -2,9 +2,9 @@
   "name": "fast-rsc-app",
   "version": "1.0.0",
   "description": "Ultra fast React Server Components app with Bun",
-  "main": "framework/start.ts",
+  "main": "core/start.ts",
   "scripts": {
-    "dev": "tsx packages/start.ts",
+    "dev": "tsx core/start.ts",
     "build": "tsc",
     "start": "node --conditions react-server dist/framework/start.js"
   },
