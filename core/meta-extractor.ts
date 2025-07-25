@@ -1,9 +1,8 @@
-import React, {
-  ReactElement,
+import {
   ReactNode,
+  ReactElement,
   isValidElement,
   cloneElement,
-  Children,
 } from "react";
 
 const DEFAULT_METADATA_TAGS = new Set(["title", "meta", "link"]);
@@ -18,41 +17,77 @@ export type MetadataMatcher = (element: ReactElement) => boolean;
 const defaultMatcher: MetadataMatcher = (el) =>
   typeof el.type === "string" && DEFAULT_METADATA_TAGS.has(el.type);
 
-/**
- * Extracts metadata (e.g., <title>, <meta>, <link>) from React children.
- * Returns separated metadata and body content.
- */
 export function extractMetadata(
   children: ReactNode,
   matcher: MetadataMatcher = defaultMatcher
 ): MetadataExtractionResult {
   const meta: ReactElement[] = [];
   const body: ReactNode[] = [];
+  const stack: ReactNode[] = [children];
 
-  Children.forEach(children, (child) => {
-    if (!isValidElement(child)) {
-      if (child != null) body.push(child);
-      return;
+  while (stack.length > 0) {
+    const node = stack.pop();
+
+    if (Array.isArray(node)) {
+      let i = node.length;
+      while (i--) stack.push(node[i]);
+      continue;
     }
 
-    if (matcher(child)) {
-      meta.push(child);
-      return;
+    if (!isValidElement(node)) {
+      if (node != null) body.push(node);
+      continue;
     }
 
-    const childChildren = child.props?.children;
-    if (childChildren) {
-      const { meta: nestedMeta, body: nestedBody } = extractMetadata(childChildren, matcher);
-      meta.push(...nestedMeta);
+    if (matcher(node)) {
+      meta.push(node);
+      continue;
+    }
+
+    const child = node.props?.children;
+    if (!child) {
+      body.push(node);
+      continue;
+    }
+
+    let hasMeta = false;
+    const nestedBody: ReactNode[] = [];
+    const nestedStack: ReactNode[] = [child];
+
+    while (nestedStack.length > 0) {
+      const nested = nestedStack.pop();
+
+      if (Array.isArray(nested)) {
+        let j = nested.length;
+        while (j--) nestedStack.push(nested[j]);
+        continue;
+      }
+
+      if (!isValidElement(nested)) {
+        if (nested != null) nestedBody.push(nested);
+        continue;
+      }
+
+      if (matcher(nested)) {
+        meta.push(nested);
+        hasMeta = true;
+        continue;
+      }
+
+      const inner = nested.props?.children;
+      if (inner) nestedStack.push(inner);
+
+      nestedBody.push(nested);
+    }
+
+    if (hasMeta) {
       body.push(
-        nestedMeta.length > 0
-          ? cloneElement(child, { ...child.props, children: nestedBody })
-          : child
+        cloneElement(node, { children: nestedBody })
       );
     } else {
-      body.push(child);
+      body.push(node);
     }
-  });
+  }
 
   return { meta, body };
 }
