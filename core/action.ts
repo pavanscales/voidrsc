@@ -1,6 +1,7 @@
 "use server";
 
 import { performance } from "node:perf_hooks";
+import { cache } from "./cache"; // your cache manager
 
 // 🚀 High-resolution timer (zero-cost wrapper)
 const now = () => performance.now();
@@ -14,7 +15,7 @@ const fastTraceId = () => {
 };
 
 // 🔒 Zero-cost, branchless security check (fail fast)
-const securityCheck = (ctx?: { headers?: Headers; cookies?: Record<string, string> }) => {
+export const securityCheck = (ctx?: { headers?: Headers; cookies?: Record<string, string> }) => {
   const csrf = ctx?.headers?.get("x-csrf-token");
   const session = ctx?.cookies?.session;
   if (!csrf || !session) throw new Error("Unauthorized");
@@ -38,6 +39,7 @@ const validate = (i: unknown): ValidationResult => {
 };
 
 // 🔧 Pure compute logic (simulate processing)
+// You can make this async if needed for DB calls etc.
 const simulate = (input: ActionInput) => ({
   processed: input,
   note: "processed locally",
@@ -110,3 +112,19 @@ export const handleAction = (
     result,
   };
 };
+export async function mutateData(
+  input: unknown,
+  ctx?: { headers?: Headers; cookies?: Record<string, string> }
+) {
+  // Here you can extend to do async DB calls or other I/O if needed
+
+  // Call your existing sync handler for validation and security
+  const result = handleAction(input, ctx);
+
+  if (result.status === "success") {
+    // Invalidate related cache keys (example - adjust to your keys)
+    cache.delete(`RSC:GET:/some-path`); // replace with your actual route key(s)
+  }
+
+  return result;
+}
