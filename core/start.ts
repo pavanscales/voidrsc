@@ -23,13 +23,13 @@ const port = Number(env.PORT ?? 3000);
 const isDev = process.env.NODE_ENV !== "production";
 
 if (isNaN(port) || port <= 0 || port > 65535) {
-  throw new Error(`❌ Invalid PORT in env: "${env.PORT}". Must be between 1-65535.`);
+  throw new Error(`Invalid PORT in env: "${env.PORT}". Must be between 1-65535.`);
 }
 
 function logRequest(method: string, url: string, duration: number) {
   const mem = process.memoryUsage();
   console.log(
-    `⏱️ ${method} ${url} - ${duration}ms | Heap: ${(mem.heapUsed / 1024 / 1024).toFixed(2)} MB | RSS: ${(mem.rss / 1024 / 1024).toFixed(2)} MB`
+    `${method} ${url} - ${duration}ms | Heap: ${(mem.heapUsed / 1024 / 1024).toFixed(2)} MB | RSS: ${(mem.rss / 1024 / 1024).toFixed(2)} MB`
   );
 }
 
@@ -58,7 +58,6 @@ async function handler(
         : (Readable.toWeb?.(req as any) ?? req) as any,
     });
 
-    // Static route
     const staticRes = await serveStatic(fetchRequest).catch(console.error);
     if (staticRes) {
       res.writeHead(staticRes.status, Object.fromEntries(staticRes.headers.entries()));
@@ -70,7 +69,6 @@ async function handler(
       return;
     }
 
-    // Dynamic route
     const dynRes = await router.render(fetchRequest, url.pathname);
     if (!dynRes) {
       res.writeHead(404, { "Content-Type": "text/plain" }).end("Not Found");
@@ -94,7 +92,7 @@ async function handler(
     res.writeHead(dynRes.status ?? 200, headers);
     body ? body.pipe(res as any) : res.end();
   } catch (err) {
-    console.error("❌ Server Error:", err);
+    console.error("Server Error:", err);
     res.writeHead(500, { "Content-Type": "text/plain" }).end("Internal Server Error");
   } finally {
     const duration = Date.now() - start;
@@ -118,16 +116,13 @@ async function runServer() {
       );
 
   server.listen(port, "0.0.0.0", () => {
-    console.log(`🚀 Worker ${process.pid} ready at ${isDev ? "http" : "https"}://localhost:${port}`);
-    if (isDev) {
-      console.log(`⚡ Cold start: ${Date.now() - bootStart}ms`);
-    } else {
-      logMetrics(bootStart);
-    }
+    console.log(`🧵 Worker ${process.pid} ready at ${isDev ? "http" : "https"}://localhost:${port}`);
+    console.log(`${isDev ? "⏱️ Cold start" : "📊 Metrics"}: ${Date.now() - bootStart}ms`);
+    if (!isDev) logMetrics(bootStart);
   });
 
   server.on("error", (err) => {
-    console.error("❌ Server error:", err);
+    console.error("Server error:", err);
     process.exit(1);
   });
 }
@@ -136,16 +131,16 @@ if (cluster.isPrimary) {
   const cpus = os.cpus().length;
   const workers = isDev ? Math.min(4, cpus) : cpus;
 
-  console.log(`🧠 Master ${process.pid} starting ${workers} workers`);
+  console.log(`👑 Master ${process.pid} starting ${workers} workers`);
   for (let i = 0; i < workers; i++) cluster.fork();
 
   cluster.on("exit", (worker) => {
-    console.log(`⚠️ Worker ${worker.process.pid} exited. Restarting...`);
+    console.log(`💀 Worker ${worker.process.pid} exited. Restarting...`);
     cluster.fork();
   });
 } else {
   runServer().catch((err) => {
-    console.error("❌ Fatal server boot failure:", err);
+    console.error("Fatal server boot failure:", err);
     process.exit(1);
   });
 }
